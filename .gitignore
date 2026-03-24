@@ -1,0 +1,19 @@
+# ---- Java / Maven ----
+server/target/
+
+# ---- Node / React ----
+client/node_modules/
+client/dist/
+
+# ---- Environment / secrets ----
+.env
+.env.local
+.env.*.local
+
+# ---- macOS ----
+.DS_Store
+
+# ---- Editor ----
+.idea/
+*.iml
+.vscode/
