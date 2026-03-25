@@ -1,4 +1,4 @@
-# CodeReview
+# CodeLab
 
 A real-time collaborative code editor. Multiple users share a live browser-based editor with live cursors, and receive AI-generated code review feedback inline.
 
