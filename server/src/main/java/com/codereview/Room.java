@@ -25,8 +25,20 @@ public class Room {
     // explicit and visible to the reader (important for the course context).
     private final Map<WebSocket, String> connections = new HashMap<>();
 
+    // Shared document content for this room.  Every EDIT message from any client
+    // updates this field (synchronized); every new joiner receives it in SYNC.
+    private String document = "";
+
     public Room(String roomCode) {
         this.roomCode = roomCode;
+    }
+
+    public synchronized String getDocument() {
+        return document;
+    }
+
+    public synchronized void setDocument(String doc) {
+        this.document = doc;
     }
 
     public String getRoomCode() {

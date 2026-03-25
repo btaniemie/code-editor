@@ -94,6 +94,7 @@ public class CodeReviewServer extends WebSocketServer {
         switch (type) {
             case "USER_JOIN"  -> handleUserJoin(conn, msg);
             case "USER_LEAVE" -> handleUserLeave(conn, msg);
+            case "EDIT"       -> handleEdit(conn, msg);
             default           -> System.out.println("[onMessage] Unknown message type: " + type);
         }
     }
@@ -156,6 +157,52 @@ public class CodeReviewServer extends WebSocketServer {
 
         System.out.println("[handleUserJoin] '" + userId + "' joined room '" + roomCode
                 + "' — room now has " + users.size() + " user(s).");
+
+        // Send the current document state privately to just the new connection
+        // so they start in sync with everyone else in the room.
+        // This is a unicast (point-to-point) rather than a broadcast.
+        JsonObject sync = new JsonObject();
+        sync.addProperty("type",     "SYNC");
+        sync.addProperty("document", room.getDocument());
+        sync.add("users", gson.toJsonTree(users));
+        conn.send(gson.toJson(sync));
+    }
+
+    /**
+     * EDIT  { "type": "EDIT", "userId": "minh", "content": "<full document text>" }
+     *
+     * 1. Update the authoritative document stored in the room (synchronized).
+     * 2. Broadcast to every client EXCEPT the sender — the sender already has
+     *    the change locally and does not need an echo.
+     *
+     * Using broadcastExcept here is the standard fanout pattern for shared editors:
+     * one writer, N-1 readers updated over their individual TCP connections.
+     */
+    private void handleEdit(WebSocket conn, JsonObject msg) {
+        if (!msg.has("content") || !msg.has("userId")) {
+            System.err.println("[handleEdit] Missing content or userId.");
+            return;
+        }
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) {
+            System.err.println("[handleEdit] EDIT from connection not in any room.");
+            return;
+        }
+
+        String content = msg.get("content").getAsString();
+        String userId  = msg.get("userId").getAsString();
+
+        // Persist the new document state in the room (thread-safe via synchronized).
+        room.setDocument(content);
+
+        // Forward to all other clients in the room over their TCP connections.
+        JsonObject broadcast = new JsonObject();
+        broadcast.addProperty("type",    "EDIT");
+        broadcast.addProperty("userId",  userId);
+        broadcast.addProperty("content", content);
+
+        room.broadcastExcept(conn, gson.toJson(broadcast));
     }
 
     /**
