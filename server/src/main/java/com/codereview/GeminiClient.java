@@ -15,14 +15,9 @@ import java.time.Duration;
  * server to generativelanguage.googleapis.com:443 using Java's built-in
  * java.net.http.HttpClient (introduced in Java 11).  This HTTPS call runs on
  * a background thread so it never blocks the WebSocket server's I/O threads.
- *
- * The API key is passed as a URL query parameter (Gemini's auth scheme).
- * Request and response bodies are JSON over HTTP/1.1 or HTTP/2 — TLS handled
- * transparently by the JDK's SSLContext.
  */
 public class GeminiClient {
 
-    // Gemini REST endpoint — API key is appended as a query parameter at call time
     private static final String API_URL_TEMPLATE =
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s";
 
@@ -34,8 +29,8 @@ public class GeminiClient {
 
     public GeminiClient(String apiKey) {
         this.apiKey = apiKey;
-        // One HttpClient instance reused across review requests.
-        // Internally this manages a connection pool over TCP/TLS.
+        // One HttpClient instance reused across review requests
+        // Internally this manages a connection pool over TCP/TLS
         this.httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(TIMEOUT_SECONDS))
             .build();
@@ -55,7 +50,7 @@ public class GeminiClient {
 
         // Build the outbound HTTPS POST request to the Gemini endpoint.
         // The JDK's HttpClient handles the TCP connect + TLS handshake before
-        // sending our HTTP/1.1 request over the established encrypted stream.
+        // sending our HTTP/1.1 request over the established encrypted stream
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .timeout(Duration.ofSeconds(TIMEOUT_SECONDS))
@@ -78,10 +73,6 @@ public class GeminiClient {
 
         return parseComments(response.body());
     }
-
-    // -------------------------------------------------------------------------
-    // Private helpers
-    // -------------------------------------------------------------------------
 
     /**
      * Builds the Gemini generateContent request body.
@@ -116,8 +107,7 @@ public class GeminiClient {
     }
 
     /**
-     * Prompt instructs Gemini to return a raw JSON array only.
-     * The "Limit to 10" guard keeps token usage predictable.
+     * Prompt instructs Gemini to return a raw JSON array only
      */
     private String buildPrompt(String document, String language) {
         return "You are a code reviewer. Review the following " + language + " code.\n"
@@ -165,7 +155,6 @@ public class GeminiClient {
             .getAsString()
             .trim();
 
-        // Strip markdown code fences in case Gemini ignores the "no fences" instruction
         text = stripMarkdownFences(text);
 
         return JsonParser.parseString(text).getAsJsonArray();
