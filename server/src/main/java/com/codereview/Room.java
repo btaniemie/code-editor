@@ -1,10 +1,13 @@
 package com.codereview;
 
+import com.google.gson.JsonObject;
 import org.java_websocket.WebSocket;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -32,6 +35,19 @@ public class Room {
     // Last known cursor line for each userId.  Ephemeral — sent to new joiners
     // in SYNC so they can see where everyone already is.
     private final Map<String, Integer> cursors = new HashMap<>();
+
+    // AI review comments accumulated for this room.  Persisted so a user who
+    // joins mid-session or after a review receives them in SYNC.
+    private final List<JsonObject> comments = new ArrayList<>();
+
+    // Programming language for this room — used to build the Gemini prompt and
+    // to tell the client which CodeMirror language extension to activate.
+    private String language = "javascript";
+
+    // Prevents two clients from triggering simultaneous reviews.
+    // Volatile so the background review thread's write is immediately visible
+    // to the WebSocket handler threads without a full synchronized block.
+    private volatile boolean reviewInProgress = false;
 
     public Room(String roomCode) {
         this.roomCode = roomCode;
@@ -96,6 +112,71 @@ public class Room {
     public synchronized boolean containsConnection(WebSocket conn) {
         return connections.containsKey(conn);
     }
+
+    // -------------------------------------------------------------------------
+    // Language
+    // -------------------------------------------------------------------------
+
+    public synchronized String getLanguage() {
+        return language;
+    }
+
+    public synchronized void setLanguage(String language) {
+        this.language = language;
+    }
+
+    // -------------------------------------------------------------------------
+    // AI review comments
+    // -------------------------------------------------------------------------
+
+    /**
+     * Appends one AI comment to the room's persistent comment list.
+     * Called from the background review thread after each Gemini response item.
+     */
+    public synchronized void addComment(int line, String text, String severity, String category) {
+        JsonObject comment = new JsonObject();
+        comment.addProperty("line",     line);
+        comment.addProperty("text",     text);
+        comment.addProperty("severity", severity);
+        comment.addProperty("category", category);
+        comments.add(comment);
+    }
+
+    /**
+     * Returns a snapshot of all accumulated comments (safe to iterate outside lock).
+     */
+    public synchronized List<JsonObject> getComments() {
+        return new ArrayList<>(comments);
+    }
+
+    /** Clears previous review results before starting a new review. */
+    public synchronized void clearComments() {
+        comments.clear();
+    }
+
+    // -------------------------------------------------------------------------
+    // Review-in-progress guard
+    // -------------------------------------------------------------------------
+
+    /**
+     * Atomically transitions reviewInProgress false -> true.
+     * Returns true if the caller won the race and should proceed with the review;
+     * false if a review is already running and this request should be dropped.
+     */
+    public synchronized boolean startReview() {
+        if (reviewInProgress) return false;
+        reviewInProgress = true;
+        return true;
+    }
+
+    /** Called in the background thread's finally block to release the lock. */
+    public synchronized void endReview() {
+        reviewInProgress = false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Broadcast helpers
+    // -------------------------------------------------------------------------
 
     /**
      * Send a JSON message to every open connection in this room.
