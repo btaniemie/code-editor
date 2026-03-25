@@ -10,23 +10,20 @@ export default function App() {
   const [users,   setUsers]   = useState([])
   const [status,  setStatus]  = useState('')
 
-  // WebSocket — ref so socket changes don't trigger re-renders.
+  // WebSocket — ref so socket changes don't trigger re-renders
   const wsRef = useRef(null)
 
-  // Functions exposed by Editor once CodeMirror has mounted (via onReady).
-  // Stored as refs for the same reason: calling them must not cause re-renders.
+  // Functions exposed by Editor once CodeMirror has mounted (via onReady)
+  // Stored as refs for the same reason, calling them must not cause re-renders
   const applyEditRef    = useRef(null)
   const applyCursorRef  = useRef(null)
   const removeCursorRef = useRef(null)
 
   // Content/cursors that arrived before the editor mounted.  Flushed in
-  // onEditorReady the moment the editor calls back with its apply functions.
+  // onEditorReady the moment the editor calls back with its apply functions
   const pendingEditRef    = useRef(null)
   const pendingCursorsRef = useRef(null) // { userId: line, ... } from SYNC
 
-  // ------------------------------------------------------------------
-  // handleJoin
-  // ------------------------------------------------------------------
   const handleJoin = useCallback((userId, roomCode) => {
     const ws = new WebSocket(SERVER_URL)
     wsRef.current = ws
@@ -42,9 +39,7 @@ export default function App() {
     ws.onerror = () => setStatus('Connection error')
   }, [])
 
-  // ------------------------------------------------------------------
-  // handleMessage — client-side message router
-  // ------------------------------------------------------------------
+  // client-side message router
   function handleMessage(msg, userId, roomCode) {
     switch (msg.type) {
 
@@ -55,19 +50,18 @@ export default function App() {
 
       case 'USER_LEAVE':
         setUsers(msg.users)
-        // Remove the departed user's cursor widget immediately.
+        // remove the user's cursor who's just left
         removeCursorRef.current?.(msg.userId)
         break
 
       case 'SYNC':
-        // Full state snapshot sent privately to us when we first join.
-        // Apply the document — queue it if the editor isn't mounted yet.
+        // apply the document — queue it if the editor isn't mounted yet
         if (applyEditRef.current) {
           applyEditRef.current(msg.document)
         } else {
           pendingEditRef.current = msg.document
         }
-        // Apply all known cursor positions from the room.
+        // apply all known cursor positions from the room
         if (msg.cursors && Object.keys(msg.cursors).length > 0) {
           if (applyCursorRef.current) {
             for (const [uid, pos] of Object.entries(msg.cursors)) {
@@ -80,13 +74,12 @@ export default function App() {
         break
 
       case 'EDIT':
-        // Another user's keystroke — push into editor with RemoteAnnotation
-        // so our update listener doesn't re-broadcast it.
+        // another user's keystroke —> push into editor with RemoteAnnotation so our update listener doesn't re-broadcast it
         applyEditRef.current?.(msg.content)
         break
 
       case 'CURSOR':
-        // Another user moved their cursor — render their widget.
+        // another user moved their cursor —> render their widget
         applyCursorRef.current?.(msg.userId, msg.pos)
         break
 
@@ -95,22 +88,20 @@ export default function App() {
     }
   }
 
-  // ------------------------------------------------------------------
   // onEditorReady — called by Editor once CodeMirror is initialized.
   // Stores the three apply functions and flushes any queued content.
-  // ------------------------------------------------------------------
   const onEditorReady = useCallback(({ applyEdit, applyCursor, removeCursor }) => {
     applyEditRef.current    = applyEdit
     applyCursorRef.current  = applyCursor
     removeCursorRef.current = removeCursor
 
-    // Flush document queued before editor was mounted (race with SYNC).
+    // flush document queued before editor was mounted
     if (pendingEditRef.current !== null) {
       applyEdit(pendingEditRef.current)
       pendingEditRef.current = null
     }
 
-    // Flush cursors from SYNC that arrived before editor was mounted.
+    // flush cursors from SYNC that arrived before editor was mounted
     if (pendingCursorsRef.current !== null) {
       for (const [uid, pos] of Object.entries(pendingCursorsRef.current)) {
         applyCursor(uid, pos)
@@ -119,29 +110,22 @@ export default function App() {
     }
   }, [])
 
-  // ------------------------------------------------------------------
-  // onLocalChange — every local keystroke triggers this.
-  // Sends the full document to the server as an EDIT message.
-  // ------------------------------------------------------------------
+  // onLocalChange - every local keystroke triggers this
+  // sends the full document to the server as an EDIT message.
   const onLocalChange = useCallback((content) => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ type: 'EDIT', userId: session?.userId, content }))
   }, [session?.userId])
 
-  // ------------------------------------------------------------------
-  // onCursorMove — fires whenever the cursor or selection moves locally.
-  // Sends a CURSOR message with the current 1-based line number.
-  // ------------------------------------------------------------------
+  // onCursorMove — whenever the cursor or selection moves locally
+  // sends a CURSOR message with the current 1-based line number
   const onCursorMove = useCallback((pos) => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ type: 'CURSOR', userId: session?.userId, pos }))
   }, [session?.userId])
 
-  // ------------------------------------------------------------------
-  // handleLeave
-  // ------------------------------------------------------------------
   const handleLeave = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({ type: 'USER_LEAVE' }))
@@ -158,9 +142,7 @@ export default function App() {
     setStatus('')
   }, [])
 
-  // ------------------------------------------------------------------
-  // Render
-  // ------------------------------------------------------------------
+  // render
   if (!session) {
     return <JoinScreen onJoin={handleJoin} />
   }

@@ -1,5 +1,3 @@
-// Stable color palette — each username gets a consistent color derived from
-// its characters so the same user always appears in the same color across all clients.
 const COLORS = [
   'bg-indigo-500',
   'bg-emerald-500',

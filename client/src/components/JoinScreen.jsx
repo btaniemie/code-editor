@@ -1,7 +1,6 @@
 import { useState } from 'react'
 
-// Generates a random 6-character alphanumeric room code, e.g. "k7xm2q".
-// Used when the user clicks "Create room" so they don't have to invent one.
+// generates a random 6-character alphanumeric room code (e.g. "k7xm2q") when user clicks "Create room"
 function generateRoomCode() {
   return Math.random().toString(36).slice(2, 8)
 }
