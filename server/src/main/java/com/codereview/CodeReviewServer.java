@@ -95,6 +95,7 @@ public class CodeReviewServer extends WebSocketServer {
             case "USER_JOIN"  -> handleUserJoin(conn, msg);
             case "USER_LEAVE" -> handleUserLeave(conn, msg);
             case "EDIT"       -> handleEdit(conn, msg);
+            case "CURSOR"     -> handleCursor(conn, msg);
             default           -> System.out.println("[onMessage] Unknown message type: " + type);
         }
     }
@@ -158,13 +159,13 @@ public class CodeReviewServer extends WebSocketServer {
         System.out.println("[handleUserJoin] '" + userId + "' joined room '" + roomCode
                 + "' — room now has " + users.size() + " user(s).");
 
-        // Send the current document state privately to just the new connection
-        // so they start in sync with everyone else in the room.
-        // This is a unicast (point-to-point) rather than a broadcast.
+        // Send the current room state privately to just the new connection
+        // (unicast, not broadcast) so they start in sync with everyone else.
         JsonObject sync = new JsonObject();
         sync.addProperty("type",     "SYNC");
         sync.addProperty("document", room.getDocument());
-        sync.add("users", gson.toJsonTree(users));
+        sync.add("users",   gson.toJsonTree(users));
+        sync.add("cursors", gson.toJsonTree(room.getCursors()));
         conn.send(gson.toJson(sync));
     }
 
@@ -238,6 +239,9 @@ public class CodeReviewServer extends WebSocketServer {
         System.out.println("[handleDisconnect] '" + userId + "' left room '"
                 + room.getRoomCode() + "'.");
 
+        // Remove their cursor so it doesn't linger for other users.
+        room.removeCursor(userId);
+
         // Notify remaining users that someone left.
         Collection<String> remaining = room.getUserIds();
 
@@ -250,5 +254,31 @@ public class CodeReviewServer extends WebSocketServer {
 
         // Remove the room from the registry if it is now empty.
         roomManager.removeRoomIfEmpty(room.getRoomCode());
+    }
+
+    /**
+     * CURSOR  { "type": "CURSOR", "userId": "minh", "line": 7 }
+     *
+     * Stores the user's last known cursor line in the room so new joiners
+     * receive it in SYNC, then broadcasts to every other client so they can
+     * render the colored cursor widget at the correct line.
+     */
+    private void handleCursor(WebSocket conn, JsonObject msg) {
+        if (!msg.has("userId") || !msg.has("pos")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String userId = msg.get("userId").getAsString();
+        int    pos    = msg.get("pos").getAsInt();
+
+        room.setCursor(userId, pos);
+
+        JsonObject broadcast = new JsonObject();
+        broadcast.addProperty("type",   "CURSOR");
+        broadcast.addProperty("userId", userId);
+        broadcast.addProperty("pos",    pos);
+
+        room.broadcastExcept(conn, gson.toJson(broadcast));
     }
 }

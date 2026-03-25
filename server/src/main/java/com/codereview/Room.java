@@ -29,6 +29,10 @@ public class Room {
     // updates this field (synchronized); every new joiner receives it in SYNC.
     private String document = "";
 
+    // Last known cursor line for each userId.  Ephemeral — sent to new joiners
+    // in SYNC so they can see where everyone already is.
+    private final Map<String, Integer> cursors = new HashMap<>();
+
     public Room(String roomCode) {
         this.roomCode = roomCode;
     }
@@ -39,6 +43,18 @@ public class Room {
 
     public synchronized void setDocument(String doc) {
         this.document = doc;
+    }
+
+    public synchronized void setCursor(String userId, int line) {
+        cursors.put(userId, line);
+    }
+
+    public synchronized Map<String, Integer> getCursors() {
+        return new HashMap<>(cursors);
+    }
+
+    public synchronized void removeCursor(String userId) {
+        cursors.remove(userId);
     }
 
     public String getRoomCode() {

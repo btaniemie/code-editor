@@ -6,40 +6,38 @@ import Editor from './components/Editor'
 const SERVER_URL = 'ws://localhost:8080'
 
 export default function App() {
-  const [session, setSession] = useState(null)   // { userId, roomCode } once joined
+  const [session, setSession] = useState(null)  // { userId, roomCode } once joined
   const [users,   setUsers]   = useState([])
   const [status,  setStatus]  = useState('')
 
-  // WebSocket connection — stored in a ref so changes to the socket don't
-  // trigger re-renders.
+  // WebSocket — ref so socket changes don't trigger re-renders.
   const wsRef = useRef(null)
 
-  // applyRemoteEdit is a function exposed by Editor via its onReady callback.
-  // Calling it patches the CodeMirror document with a remote annotation so
-  // the editor's own update listener ignores the change and does not re-send it.
-  const applyRemoteRef = useRef(null)
+  // Functions exposed by Editor once CodeMirror has mounted (via onReady).
+  // Stored as refs for the same reason: calling them must not cause re-renders.
+  const applyEditRef    = useRef(null)
+  const applyCursorRef  = useRef(null)
+  const removeCursorRef = useRef(null)
 
-  // If a SYNC or EDIT message arrives before the Editor has mounted and called
-  // onReady, we park the content here and flush it as soon as onReady fires.
-  const pendingContentRef = useRef(null)
+  // Content/cursors that arrived before the editor mounted.  Flushed in
+  // onEditorReady the moment the editor calls back with its apply functions.
+  const pendingEditRef    = useRef(null)
+  const pendingCursorsRef = useRef(null) // { userId: line, ... } from SYNC
 
   // ------------------------------------------------------------------
-  // handleJoin — opens the WebSocket and sends USER_JOIN
+  // handleJoin
   // ------------------------------------------------------------------
   const handleJoin = useCallback((userId, roomCode) => {
     const ws = new WebSocket(SERVER_URL)
     wsRef.current = ws
 
-    ws.onopen = () => {
+    ws.onopen  = () => {
       ws.send(JSON.stringify({ type: 'USER_JOIN', userId, roomCode }))
       setStatus('Connected')
     }
-
     ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data)
-      handleMessage(msg, userId, roomCode)
+      handleMessage(JSON.parse(event.data), userId, roomCode)
     }
-
     ws.onclose = () => setStatus('Disconnected')
     ws.onerror = () => setStatus('Connection error')
   }, [])
@@ -51,28 +49,45 @@ export default function App() {
     switch (msg.type) {
 
       case 'USER_JOIN':
-        // Server echoes USER_JOIN to everyone including the sender.
-        // First time we receive this it means our join was accepted —
-        // transition from the join screen to the room view.
         setUsers(msg.users)
         setSession({ userId, roomCode })
         break
 
       case 'USER_LEAVE':
         setUsers(msg.users)
+        // Remove the departed user's cursor widget immediately.
+        removeCursorRef.current?.(msg.userId)
         break
 
       case 'SYNC':
-        // Server sends SYNC privately to a new joiner with the current
-        // document so they start in sync with the rest of the room.
-        applyOrQueue(msg.document)
+        // Full state snapshot sent privately to us when we first join.
+        // Apply the document — queue it if the editor isn't mounted yet.
+        if (applyEditRef.current) {
+          applyEditRef.current(msg.document)
+        } else {
+          pendingEditRef.current = msg.document
+        }
+        // Apply all known cursor positions from the room.
+        if (msg.cursors && Object.keys(msg.cursors).length > 0) {
+          if (applyCursorRef.current) {
+            for (const [uid, pos] of Object.entries(msg.cursors)) {
+              applyCursorRef.current(uid, pos)
+            }
+          } else {
+            pendingCursorsRef.current = msg.cursors
+          }
+        }
         break
 
       case 'EDIT':
-        // Another user made a change — apply it to our CodeMirror instance.
-        // The RemoteAnnotation inside applyRemoteRef prevents the editor's
-        // update listener from re-broadcasting this back to the server.
-        applyOrQueue(msg.content)
+        // Another user's keystroke — push into editor with RemoteAnnotation
+        // so our update listener doesn't re-broadcast it.
+        applyEditRef.current?.(msg.content)
+        break
+
+      case 'CURSOR':
+        // Another user moved their cursor — render their widget.
+        applyCursorRef.current?.(msg.userId, msg.pos)
         break
 
       default:
@@ -80,40 +95,48 @@ export default function App() {
     }
   }
 
-  // Apply a remote document update if the editor is ready, otherwise park it
-  // so onEditorReady can flush it the moment the editor mounts.
-  function applyOrQueue(content) {
-    if (applyRemoteRef.current) {
-      applyRemoteRef.current(content)
-    } else {
-      pendingContentRef.current = content
-    }
-  }
+  // ------------------------------------------------------------------
+  // onEditorReady — called by Editor once CodeMirror is initialized.
+  // Stores the three apply functions and flushes any queued content.
+  // ------------------------------------------------------------------
+  const onEditorReady = useCallback(({ applyEdit, applyCursor, removeCursor }) => {
+    applyEditRef.current    = applyEdit
+    applyCursorRef.current  = applyCursor
+    removeCursorRef.current = removeCursor
 
-  // ------------------------------------------------------------------
-  // onEditorReady — called by Editor once CodeMirror is fully initialized.
-  // Stores the apply function and immediately flushes any queued content.
-  // ------------------------------------------------------------------
-  const onEditorReady = useCallback((applyFn) => {
-    applyRemoteRef.current = applyFn
-    if (pendingContentRef.current !== null) {
-      applyFn(pendingContentRef.current)
-      pendingContentRef.current = null
+    // Flush document queued before editor was mounted (race with SYNC).
+    if (pendingEditRef.current !== null) {
+      applyEdit(pendingEditRef.current)
+      pendingEditRef.current = null
+    }
+
+    // Flush cursors from SYNC that arrived before editor was mounted.
+    if (pendingCursorsRef.current !== null) {
+      for (const [uid, pos] of Object.entries(pendingCursorsRef.current)) {
+        applyCursor(uid, pos)
+      }
+      pendingCursorsRef.current = null
     }
   }, [])
 
   // ------------------------------------------------------------------
-  // onLocalChange — called by Editor on every local keystroke.
-  // Sends the full document text to the server as an EDIT message.
+  // onLocalChange — every local keystroke triggers this.
+  // Sends the full document to the server as an EDIT message.
   // ------------------------------------------------------------------
   const onLocalChange = useCallback((content) => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify({
-      type:    'EDIT',
-      userId:  session?.userId,
-      content,
-    }))
+    ws.send(JSON.stringify({ type: 'EDIT', userId: session?.userId, content }))
+  }, [session?.userId])
+
+  // ------------------------------------------------------------------
+  // onCursorMove — fires whenever the cursor or selection moves locally.
+  // Sends a CURSOR message with the current 1-based line number.
+  // ------------------------------------------------------------------
+  const onCursorMove = useCallback((pos) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'CURSOR', userId: session?.userId, pos }))
   }, [session?.userId])
 
   // ------------------------------------------------------------------
@@ -125,8 +148,11 @@ export default function App() {
       wsRef.current.close()
       wsRef.current = null
     }
-    applyRemoteRef.current  = null
-    pendingContentRef.current = null
+    applyEditRef.current    = null
+    applyCursorRef.current  = null
+    removeCursorRef.current = null
+    pendingEditRef.current    = null
+    pendingCursorsRef.current = null
     setSession(null)
     setUsers([])
     setStatus('')
@@ -161,9 +187,13 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Editor — fills all remaining space */}
+      {/* Editor */}
       <main className="flex-1 overflow-hidden">
-        <Editor onLocalChange={onLocalChange} onReady={onEditorReady} />
+        <Editor
+          onLocalChange={onLocalChange}
+          onCursorMove={onCursorMove}
+          onReady={onEditorReady}
+        />
       </main>
     </div>
   )
