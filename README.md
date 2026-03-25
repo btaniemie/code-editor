@@ -16,16 +16,27 @@ mvn -version
 node -version
 ```
 
+## Setup
+
+The server requires a Gemini API key. Create a `.env` file inside the `server/` directory:
+
+```
+GEMINI_API_KEY=your_api_key_here
+```
+
 ## Running the Server
 
 ```bash
 cd server
+source .env
 mvn package -q
 java -jar target/codereview-server.jar
 ```
 
 Expected output:
 ```
+[Server] GEMINI_API_KEY loaded (length=39, prefix=AIzaSy...)
+[Main] Server started. Press Ctrl+C to stop.
 [Server] CodeReview WebSocket server listening on port 8080
 [Server] Waiting for client connections...
 ```
