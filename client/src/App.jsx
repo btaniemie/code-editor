@@ -153,7 +153,7 @@ export default function App() {
       <aside className="w-56 flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col">
         <div className="px-4 py-3 border-b border-gray-800">
           <p className="text-xs text-gray-400 uppercase tracking-widest">Room</p>
-          <p className="text-lg font-mono font-bold text-indigo-400">{session.roomCode}</p>
+          <p className="text-lg font-mono font-bold text-emerald-400">{session.roomCode}</p>
         </div>
 
         <UserList users={users} currentUserId={session.userId} />

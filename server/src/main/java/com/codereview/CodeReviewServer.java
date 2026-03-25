@@ -11,8 +11,6 @@ import java.net.InetSocketAddress;
 import java.util.Collection;
 
 /**
- * CodeReviewServer — the core networking component.
- *
  * Extends org.java-websocket's WebSocketServer, which internally creates a
  * java.net.ServerSocket listening on the given port and accepts each incoming
  * TCP connection on its own thread.  Each accepted socket is upgraded to the
@@ -90,7 +88,7 @@ public class CodeReviewServer extends WebSocketServer {
 
         String type = msg.get("type").getAsString();
 
-        // --- Message router ---
+        // Message router 
         switch (type) {
             case "USER_JOIN"  -> handleUserJoin(conn, msg);
             case "USER_LEAVE" -> handleUserLeave(conn, msg);
@@ -114,9 +112,7 @@ public class CodeReviewServer extends WebSocketServer {
         System.out.println("[Server] Waiting for client connections...");
     }
 
-    // -------------------------------------------------------------------------
     // Message handlers
-    // -------------------------------------------------------------------------
 
     /**
      * USER_JOIN  { "type": "USER_JOIN", "userId": "minh", "roomCode": "abc123" }

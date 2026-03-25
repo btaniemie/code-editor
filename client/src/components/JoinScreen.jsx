@@ -36,7 +36,7 @@ export default function JoinScreen({ onJoin }) {
     <div className="min-h-screen flex items-center justify-center bg-gray-950">
       <div className="w-full max-w-sm bg-gray-900 rounded-xl p-8 shadow-2xl border border-gray-800">
         {/* Logo / title */}
-        <h1 className="text-2xl font-bold text-indigo-400 mb-1">CodeReview</h1>
+        <h1 className="text-2xl font-bold text-emerald-400 mb-1">CodeLab</h1>
         <p className="text-sm text-gray-400 mb-6">Real-time collaborative code review</p>
 
         <form onSubmit={handleJoin} className="space-y-4">
@@ -49,9 +49,9 @@ export default function JoinScreen({ onJoin }) {
               type="text"
               value={userId}
               onChange={e => setUserId(e.target.value)}
-              placeholder="e.g. minh"
+              placeholder="networks"
               maxLength={24}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-emerald-500"
             />
           </div>
 
@@ -64,9 +64,9 @@ export default function JoinScreen({ onJoin }) {
               type="text"
               value={roomCode}
               onChange={e => setRoomCode(e.target.value)}
-              placeholder="e.g. abc123"
+              placeholder="com314"
               maxLength={12}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500 font-mono"
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-emerald-500 font-mono"
             />
           </div>
 
@@ -79,7 +79,7 @@ export default function JoinScreen({ onJoin }) {
           <div className="flex gap-3 pt-1">
             <button
               type="submit"
-              className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded px-4 py-2 transition-colors"
+              className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded px-4 py-2 transition-colors"
             >
               Join room
             </button>

@@ -1,10 +1,9 @@
 package com.codereview;
 
 /**
- * Entry point.  Reads an optional port argument, starts the WebSocket server,
+ * Entry point. Reads an optional port argument, starts the WebSocket server,
  * and blocks until the process is killed.
  *
- * Usage:
  *   java -jar target/codereview-server.jar          # default port 8080
  *   java -jar target/codereview-server.jar 9000     # custom port
  */
