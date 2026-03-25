@@ -3,6 +3,7 @@ package com.codereview;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonArray;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
@@ -23,14 +24,28 @@ import java.util.Collection;
  */
 public class CodeReviewServer extends WebSocketServer {
 
-    private final RoomManager roomManager = new RoomManager();
-    private final Gson gson = new Gson();
+    private final RoomManager  roomManager = new RoomManager();
+    private final Gson         gson        = new Gson();
+    private final GeminiClient gemini;
 
     public CodeReviewServer(int port) {
         // Bind to all interfaces (0.0.0.0) on the given port.
         // org.java-websocket wraps java.net.ServerSocket under the hood.
         super(new InetSocketAddress(port));
         setReuseAddr(true);
+
+        // Read the Gemini API key from the environment.
+        // If missing, reviews will fail with AI_ERROR — server still starts.
+        String apiKey = System.getenv("GEMINI_API_KEY");
+        if (apiKey != null) apiKey = apiKey.trim(); // strip accidental whitespace/CRLF from .env
+        if (apiKey == null || apiKey.isBlank()) {
+            System.err.println("[Server] WARNING: GEMINI_API_KEY not set. Reviews will return AI_ERROR.");
+            apiKey = "";
+        } else {
+            System.out.println("[Server] GEMINI_API_KEY loaded (length=" + apiKey.length()
+                + ", prefix=" + apiKey.substring(0, Math.min(6, apiKey.length())) + "...)");
+        }
+        this.gemini = new GeminiClient(apiKey);
     }
 
     // -------------------------------------------------------------------------
@@ -88,13 +103,14 @@ public class CodeReviewServer extends WebSocketServer {
 
         String type = msg.get("type").getAsString();
 
-        // Message router 
+        // Message router
         switch (type) {
-            case "USER_JOIN"  -> handleUserJoin(conn, msg);
-            case "USER_LEAVE" -> handleUserLeave(conn, msg);
-            case "EDIT"       -> handleEdit(conn, msg);
-            case "CURSOR"     -> handleCursor(conn, msg);
-            default           -> System.out.println("[onMessage] Unknown message type: " + type);
+            case "USER_JOIN"      -> handleUserJoin(conn, msg);
+            case "USER_LEAVE"     -> handleUserLeave(conn, msg);
+            case "EDIT"           -> handleEdit(conn, msg);
+            case "CURSOR"         -> handleCursor(conn, msg);
+            case "REVIEW_REQUEST" -> handleReviewRequest(conn, msg);
+            default               -> System.out.println("[onMessage] Unknown message type: " + type);
         }
     }
 
@@ -160,8 +176,10 @@ public class CodeReviewServer extends WebSocketServer {
         JsonObject sync = new JsonObject();
         sync.addProperty("type",     "SYNC");
         sync.addProperty("document", room.getDocument());
-        sync.add("users",   gson.toJsonTree(users));
-        sync.add("cursors", gson.toJsonTree(room.getCursors()));
+        sync.addProperty("language", room.getLanguage());
+        sync.add("users",    gson.toJsonTree(users));
+        sync.add("cursors",  gson.toJsonTree(room.getCursors()));
+        sync.add("comments", gson.toJsonTree(room.getComments()));
         conn.send(gson.toJson(sync));
     }
 
@@ -250,6 +268,107 @@ public class CodeReviewServer extends WebSocketServer {
 
         // Remove the room from the registry if it is now empty.
         roomManager.removeRoomIfEmpty(room.getRoomCode());
+    }
+
+    /**
+     * REVIEW_REQUEST  { "type": "REVIEW_REQUEST", "userId": "minh", "language": "python" }
+     *
+     * 1. Reject the request if a review is already in progress (atomic CAS via startReview()).
+     * 2. Optionally update the room's language from the request.
+     * 3. Clear previous comments and broadcast REVIEW_START to all clients.
+     * 4. Snapshot the current document and launch a background thread that:
+     *    a. Opens an outbound HTTPS connection to the Gemini API (secondary TCP stream).
+     *    b. Parses the JSON array response.
+     *    c. Stores each comment in room state and broadcasts AI_COMMENT to the room.
+     *    d. Broadcasts REVIEW_DONE (or AI_ERROR on failure).
+     *    e. Releases the review lock in a finally block.
+     *
+     * The background thread is a daemon so it does not prevent JVM shutdown.
+     * It is named "review-<roomCode>" to make it visible in thread dumps.
+     */
+    private void handleReviewRequest(WebSocket conn, JsonObject msg) {
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        // Update language if the client included it
+        if (msg.has("language") && !msg.get("language").getAsString().isBlank()) {
+            room.setLanguage(msg.get("language").getAsString());
+        }
+
+        String userId = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        // Atomic guard — only one review at a time per room
+        if (!room.startReview()) {
+            System.out.println("[handleReviewRequest] Review already in progress, ignoring request from '"
+                    + userId + "'.");
+            return;
+        }
+
+        System.out.println("[handleReviewRequest] '" + userId + "' triggered review in room '"
+                + room.getRoomCode() + "' (language: " + room.getLanguage() + ").");
+
+        // Clear stale comments and tell every client a review is starting
+        room.clearComments();
+
+        JsonObject start = new JsonObject();
+        start.addProperty("type", "REVIEW_START");
+        room.broadcast(gson.toJson(start));
+
+        // Snapshot document state now — edits that arrive during the review
+        // do not affect what Gemini sees, keeping the comments consistent.
+        final String documentSnapshot = room.getDocument();
+        final String language         = room.getLanguage();
+
+        // Launch the Gemini API call on a dedicated background thread.
+        // This secondary outbound TCP/HTTPS connection runs independently of
+        // the WebSocket server's connection-handling threads.
+        Thread reviewThread = new Thread(() -> {
+            try {
+                JsonArray comments = gemini.review(documentSnapshot, language);
+                System.out.println("[reviewThread] Gemini returned " + comments.size() + " comment(s).");
+
+                for (int i = 0; i < comments.size(); i++) {
+                    JsonObject c = comments.get(i).getAsJsonObject();
+
+                    int    line     = c.has("line")     ? c.get("line").getAsInt()        : 1;
+                    String text     = c.has("text")     ? c.get("text").getAsString()     : "";
+                    String severity = c.has("severity") ? c.get("severity").getAsString() : "info";
+                    String category = c.has("category") ? c.get("category").getAsString() : "style";
+
+                    // Persist so late-joining users receive it in SYNC
+                    room.addComment(line, text, severity, category);
+
+                    // Broadcast to every client in the room over their TCP connections
+                    JsonObject aiComment = new JsonObject();
+                    aiComment.addProperty("type",     "AI_COMMENT");
+                    aiComment.addProperty("line",     line);
+                    aiComment.addProperty("text",     text);
+                    aiComment.addProperty("severity", severity);
+                    aiComment.addProperty("category", category);
+                    room.broadcast(gson.toJson(aiComment));
+                }
+
+                JsonObject done = new JsonObject();
+                done.addProperty("type", "REVIEW_DONE");
+                room.broadcast(gson.toJson(done));
+
+            } catch (Exception e) {
+                System.err.println("[reviewThread] Gemini API error: " + e.getMessage());
+
+                JsonObject error = new JsonObject();
+                error.addProperty("type", "AI_ERROR");
+                error.addProperty("text", "Review failed: " + e.getMessage());
+                room.broadcast(gson.toJson(error));
+
+            } finally {
+                // Always release the lock so future reviews can proceed
+                room.endReview();
+            }
+        });
+
+        reviewThread.setDaemon(true);
+        reviewThread.setName("review-" + room.getRoomCode());
+        reviewThread.start();
     }
 
     /**

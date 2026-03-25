@@ -1,34 +1,41 @@
 import { useState, useRef, useCallback } from 'react'
-import JoinScreen from './components/JoinScreen'
-import UserList from './components/UserList'
-import Editor from './components/Editor'
+import JoinScreen    from './components/JoinScreen'
+import UserList      from './components/UserList'
+import Editor        from './components/Editor'
+import CommentsPanel from './components/CommentsPanel'
 
 const SERVER_URL = 'ws://localhost:8080'
 
 export default function App() {
-  const [session, setSession] = useState(null)  // { userId, roomCode } once joined
-  const [users,   setUsers]   = useState([])
-  const [status,  setStatus]  = useState('')
+  const [session,          setSession]          = useState(null)  // { userId, roomCode }
+  const [users,            setUsers]            = useState([])
+  const [status,           setStatus]           = useState('')
+  const [comments,         setComments]         = useState([])    // AI comment list for panel
+  const [reviewInProgress, setReviewInProgress] = useState(false)
 
-  // WebSocket — ref so socket changes don't trigger re-renders
+  // WebSocket — ref so socket identity changes don't trigger re-renders
   const wsRef = useRef(null)
 
-  // Functions exposed by Editor once CodeMirror has mounted (via onReady)
-  // Stored as refs for the same reason, calling them must not cause re-renders
-  const applyEditRef    = useRef(null)
-  const applyCursorRef  = useRef(null)
-  const removeCursorRef = useRef(null)
+  // Imperative handles into the CodeMirror editor.
+  // Stored as refs so calling them never triggers a React re-render.
+  const applyEditRef     = useRef(null)
+  const applyCursorRef   = useRef(null)
+  const removeCursorRef  = useRef(null)
+  const addCommentRef    = useRef(null)   // Phase 2
+  const clearCommentsRef = useRef(null)  // Phase 2
 
-  // Content/cursors that arrived before the editor mounted.  Flushed in
-  // onEditorReady the moment the editor calls back with its apply functions
-  const pendingEditRef    = useRef(null)
-  const pendingCursorsRef = useRef(null) // { userId: line, ... } from SYNC
+  // Content that arrived before the editor was mounted — flushed in onEditorReady.
+  const pendingEditRef     = useRef(null)
+  const pendingCursorsRef  = useRef(null)
+  const pendingCommentsRef = useRef(null) // Comment[] from SYNC before editor mounted
+
+  // ── WebSocket connection ────────────────────────────────────────────────
 
   const handleJoin = useCallback((userId, roomCode) => {
     const ws = new WebSocket(SERVER_URL)
     wsRef.current = ws
 
-    ws.onopen  = () => {
+    ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'USER_JOIN', userId, roomCode }))
       setStatus('Connected')
     }
@@ -39,7 +46,8 @@ export default function App() {
     ws.onerror = () => setStatus('Connection error')
   }, [])
 
-  // client-side message router
+  // ── Client-side message router ──────────────────────────────────────────
+
   function handleMessage(msg, userId, roomCode) {
     switch (msg.type) {
 
@@ -50,37 +58,73 @@ export default function App() {
 
       case 'USER_LEAVE':
         setUsers(msg.users)
-        // remove the user's cursor who's just left
         removeCursorRef.current?.(msg.userId)
         break
 
-      case 'SYNC':
-        // apply the document — queue it if the editor isn't mounted yet
+      // SYNC is sent to a newly joined client with full room state.
+      // Apply document, cursors, and any previously generated AI comments.
+      case 'SYNC': {
         if (applyEditRef.current) {
           applyEditRef.current(msg.document)
         } else {
           pendingEditRef.current = msg.document
         }
-        // apply all known cursor positions from the room
+
         if (msg.cursors && Object.keys(msg.cursors).length > 0) {
           if (applyCursorRef.current) {
-            for (const [uid, pos] of Object.entries(msg.cursors)) {
+            for (const [uid, pos] of Object.entries(msg.cursors))
               applyCursorRef.current(uid, pos)
-            }
           } else {
             pendingCursorsRef.current = msg.cursors
           }
         }
+
+        if (msg.comments && msg.comments.length > 0) {
+          setComments(msg.comments)
+          if (clearCommentsRef.current && addCommentRef.current) {
+            clearCommentsRef.current()
+            for (const c of msg.comments)
+              addCommentRef.current(c.line, c.text, c.severity, c.category)
+          } else {
+            pendingCommentsRef.current = msg.comments
+          }
+        }
         break
+      }
 
       case 'EDIT':
-        // another user's keystroke —> push into editor with RemoteAnnotation so our update listener doesn't re-broadcast it
+        // Remote edit — push into CodeMirror without re-broadcasting
         applyEditRef.current?.(msg.content)
         break
 
       case 'CURSOR':
-        // another user moved their cursor —> render their widget
         applyCursorRef.current?.(msg.userId, msg.pos)
+        break
+
+      // ── Phase 2: review pipeline ──────────────────────────────────────
+
+      case 'REVIEW_START':
+        // Clear stale comments in both the panel and the editor gutter
+        setReviewInProgress(true)
+        setComments([])
+        clearCommentsRef.current?.()
+        break
+
+      case 'AI_COMMENT': {
+        const c = { line: msg.line, text: msg.text, severity: msg.severity, category: msg.category }
+        // Update panel (React state) and editor gutter (CodeMirror state) separately
+        setComments(prev => [...prev, c])
+        addCommentRef.current?.(msg.line, msg.text, msg.severity, msg.category)
+        break
+      }
+
+      case 'REVIEW_DONE':
+        setReviewInProgress(false)
+        break
+
+      case 'AI_ERROR':
+        setReviewInProgress(false)
+        setStatus('AI error: ' + msg.text)
         break
 
       default:
@@ -88,42 +132,58 @@ export default function App() {
     }
   }
 
-  // onEditorReady — called by Editor once CodeMirror is initialized.
-  // Stores the three apply functions and flushes any queued content.
-  const onEditorReady = useCallback(({ applyEdit, applyCursor, removeCursor }) => {
-    applyEditRef.current    = applyEdit
-    applyCursorRef.current  = applyCursor
-    removeCursorRef.current = removeCursor
+  // ── Editor ready callback ───────────────────────────────────────────────
+  // Called once CodeMirror has mounted.  Captures all imperative handles and
+  // flushes any content that arrived before the editor was ready.
 
-    // flush document queued before editor was mounted
+  const onEditorReady = useCallback(({
+    applyEdit, applyCursor, removeCursor, addComment, clearComments,
+  }) => {
+    applyEditRef.current     = applyEdit
+    applyCursorRef.current   = applyCursor
+    removeCursorRef.current  = removeCursor
+    addCommentRef.current    = addComment
+    clearCommentsRef.current = clearComments
+
     if (pendingEditRef.current !== null) {
       applyEdit(pendingEditRef.current)
       pendingEditRef.current = null
     }
-
-    // flush cursors from SYNC that arrived before editor was mounted
     if (pendingCursorsRef.current !== null) {
-      for (const [uid, pos] of Object.entries(pendingCursorsRef.current)) {
+      for (const [uid, pos] of Object.entries(pendingCursorsRef.current))
         applyCursor(uid, pos)
-      }
       pendingCursorsRef.current = null
+    }
+    if (pendingCommentsRef.current !== null) {
+      clearComments()
+      for (const c of pendingCommentsRef.current)
+        addComment(c.line, c.text, c.severity, c.category)
+      pendingCommentsRef.current = null
     }
   }, [])
 
-  // onLocalChange - every local keystroke triggers this
-  // sends the full document to the server as an EDIT message.
+  // ── Outbound message senders ────────────────────────────────────────────
+
   const onLocalChange = useCallback((content) => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ type: 'EDIT', userId: session?.userId, content }))
   }, [session?.userId])
 
-  // onCursorMove — whenever the cursor or selection moves locally
-  // sends a CURSOR message with the current 1-based line number
   const onCursorMove = useCallback((pos) => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ type: 'CURSOR', userId: session?.userId, pos }))
+  }, [session?.userId])
+
+  const handleRequestReview = useCallback(() => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({
+      type:     'REVIEW_REQUEST',
+      userId:   session?.userId,
+      language: 'javascript',
+    }))
   }, [session?.userId])
 
   const handleLeave = useCallback(() => {
@@ -132,24 +192,31 @@ export default function App() {
       wsRef.current.close()
       wsRef.current = null
     }
-    applyEditRef.current    = null
-    applyCursorRef.current  = null
-    removeCursorRef.current = null
-    pendingEditRef.current    = null
-    pendingCursorsRef.current = null
+    applyEditRef.current     = null
+    applyCursorRef.current   = null
+    removeCursorRef.current  = null
+    addCommentRef.current    = null
+    clearCommentsRef.current = null
+    pendingEditRef.current     = null
+    pendingCursorsRef.current  = null
+    pendingCommentsRef.current = null
     setSession(null)
     setUsers([])
     setStatus('')
+    setComments([])
+    setReviewInProgress(false)
   }, [])
 
-  // render
+  // ── Render ──────────────────────────────────────────────────────────────
+
   if (!session) {
     return <JoinScreen onJoin={handleJoin} />
   }
 
   return (
     <div className="flex h-screen bg-gray-950 text-gray-100 overflow-hidden">
-      {/* Sidebar */}
+
+      {/* Left sidebar — room info, user list, connection status */}
       <aside className="w-56 flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col">
         <div className="px-4 py-3 border-b border-gray-800">
           <p className="text-xs text-gray-400 uppercase tracking-widest">Room</p>
@@ -159,7 +226,7 @@ export default function App() {
         <UserList users={users} currentUserId={session.userId} />
 
         <div className="mt-auto px-4 py-3 border-t border-gray-800 space-y-2">
-          <p className="text-xs text-gray-500">{status}</p>
+          <p className="text-xs text-gray-500 truncate">{status}</p>
           <button
             onClick={handleLeave}
             className="w-full text-sm bg-gray-800 hover:bg-red-900 text-gray-300 hover:text-red-200 rounded px-3 py-1.5 transition-colors"
@@ -169,7 +236,7 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Editor */}
+      {/* Shared editor — takes all remaining horizontal space */}
       <main className="flex-1 overflow-hidden">
         <Editor
           onLocalChange={onLocalChange}
@@ -177,6 +244,13 @@ export default function App() {
           onReady={onEditorReady}
         />
       </main>
+
+      {/* Right panel — AI review button + comment list */}
+      <CommentsPanel
+        comments={comments}
+        reviewInProgress={reviewInProgress}
+        onRequestReview={handleRequestReview}
+      />
     </div>
   )
 }
