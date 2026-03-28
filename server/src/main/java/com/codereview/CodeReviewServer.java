@@ -103,14 +103,17 @@ public class CodeReviewServer extends WebSocketServer {
 
         String type = msg.get("type").getAsString();
 
-        // Message router
+        // Message router — each case corresponds to one opcode in our
+        // application-layer protocol.
         switch (type) {
             case "USER_JOIN"      -> handleUserJoin(conn, msg);
             case "USER_LEAVE"     -> handleUserLeave(conn, msg);
             case "EDIT"           -> handleEdit(conn, msg);
             case "CURSOR"         -> handleCursor(conn, msg);
             case "REVIEW_REQUEST" -> handleReviewRequest(conn, msg);
-            default               -> System.out.println("[onMessage] Unknown message type: " + type);
+            case "CHAT"            -> handleChat(conn, msg);
+            case "LANGUAGE_CHANGE" -> handleLanguageChange(conn, msg);
+            default                -> System.out.println("[onMessage] Unknown message type: " + type);
         }
     }
 
@@ -137,6 +140,8 @@ public class CodeReviewServer extends WebSocketServer {
      * 2. Register (conn, userId) in the room.
      * 3. Broadcast USER_JOIN to everyone in the room (including the sender so
      *    the client knows the join was accepted).
+     * 4. Send a full SYNC privately to the new connection.
+     * 5. Append a system chat notification and broadcast it to all members.
      */
     private void handleUserJoin(WebSocket conn, JsonObject msg) {
         if (!msg.has("userId") || !msg.has("roomCode")) {
@@ -180,7 +185,21 @@ public class CodeReviewServer extends WebSocketServer {
         sync.add("users",    gson.toJsonTree(users));
         sync.add("cursors",  gson.toJsonTree(room.getCursors()));
         sync.add("comments", gson.toJsonTree(room.getComments()));
+        sync.add("chat",     gson.toJsonTree(room.getChatHistory()));
         conn.send(gson.toJson(sync));
+
+        // Broadcast a system chat notification so all users see who joined.
+        // We store it in history so late joiners see it too.
+        String joinText = userId + " joined the room";
+        room.addChatMessage("system", joinText, -1);
+
+        JsonObject chatNotif = new JsonObject();
+        chatNotif.addProperty("type",      "CHAT");
+        chatNotif.addProperty("userId",    "system");
+        chatNotif.addProperty("text",      joinText);
+        chatNotif.addProperty("timestamp", System.currentTimeMillis());
+        chatNotif.add("replyTo", null);
+        room.broadcast(gson.toJson(chatNotif));
     }
 
     /**
@@ -212,12 +231,12 @@ public class CodeReviewServer extends WebSocketServer {
         room.setDocument(content);
 
         // Forward to all other clients in the room over their TCP connections.
-        JsonObject broadcast = new JsonObject();
-        broadcast.addProperty("type",    "EDIT");
-        broadcast.addProperty("userId",  userId);
-        broadcast.addProperty("content", content);
+        JsonObject fwd = new JsonObject();
+        fwd.addProperty("type",    "EDIT");
+        fwd.addProperty("userId",  userId);
+        fwd.addProperty("content", content);
 
-        room.broadcastExcept(conn, gson.toJson(broadcast));
+        room.broadcastExcept(conn, gson.toJson(fwd));
     }
 
     /**
@@ -235,8 +254,9 @@ public class CodeReviewServer extends WebSocketServer {
      *
      * 1. Find which room this connection belongs to.
      * 2. Remove the connection and retrieve the userId.
-     * 3. Broadcast USER_LEAVE to remaining users.
-     * 4. Clean up the room if it is now empty.
+     * 3. Append a system chat notification and broadcast it.
+     * 4. Broadcast USER_LEAVE to remaining users.
+     * 5. Clean up the room if it is now empty.
      */
     private void handleDisconnect(WebSocket conn) {
         Room room = roomManager.getRoomForConnection(conn);
@@ -256,15 +276,27 @@ public class CodeReviewServer extends WebSocketServer {
         // Remove their cursor so it doesn't linger for other users.
         room.removeCursor(userId);
 
+        // Store and broadcast a system chat message for the leave event.
+        String leaveText = userId + " left the room";
+        room.addChatMessage("system", leaveText, -1);
+
+        JsonObject chatNotif = new JsonObject();
+        chatNotif.addProperty("type",      "CHAT");
+        chatNotif.addProperty("userId",    "system");
+        chatNotif.addProperty("text",      leaveText);
+        chatNotif.addProperty("timestamp", System.currentTimeMillis());
+        chatNotif.add("replyTo", null);
+        room.broadcast(gson.toJson(chatNotif));
+
         // Notify remaining users that someone left.
         Collection<String> remaining = room.getUserIds();
 
-        JsonObject broadcast = new JsonObject();
-        broadcast.addProperty("type",   "USER_LEAVE");
-        broadcast.addProperty("userId", userId);
-        broadcast.add("users", gson.toJsonTree(remaining));
+        JsonObject leaveBroadcast = new JsonObject();
+        leaveBroadcast.addProperty("type",   "USER_LEAVE");
+        leaveBroadcast.addProperty("userId", userId);
+        leaveBroadcast.add("users", gson.toJsonTree(remaining));
 
-        room.broadcast(gson.toJson(broadcast));
+        room.broadcast(gson.toJson(leaveBroadcast));
 
         // Remove the room from the registry if it is now empty.
         roomManager.removeRoomIfEmpty(room.getRoomCode());
@@ -327,6 +359,14 @@ public class CodeReviewServer extends WebSocketServer {
                 JsonArray comments = gemini.review(documentSnapshot, language);
                 System.out.println("[reviewThread] Gemini returned " + comments.size() + " comment(s).");
 
+                // If every client disconnected while Gemini was thinking, skip
+                // broadcasting — the room may already be removed from RoomManager.
+                if (room.isEmpty()) {
+                    System.out.println("[reviewThread] Room '" + room.getRoomCode()
+                            + "' is empty after review completed, skipping broadcast.");
+                    return;
+                }
+
                 for (int i = 0; i < comments.size(); i++) {
                     JsonObject c = comments.get(i).getAsJsonObject();
 
@@ -355,13 +395,24 @@ public class CodeReviewServer extends WebSocketServer {
             } catch (Exception e) {
                 System.err.println("[reviewThread] Gemini API error: " + e.getMessage());
 
+                // Give a human-readable message for the most common failure modes.
+                String errText;
+                if (e instanceof java.net.http.HttpTimeoutException) {
+                    errText = "Review timed out after 30 s — please try again.";
+                } else if (e instanceof InterruptedException) {
+                    errText = "Review was interrupted.";
+                } else {
+                    errText = "Review failed: " + e.getMessage();
+                }
+
                 JsonObject error = new JsonObject();
                 error.addProperty("type", "AI_ERROR");
-                error.addProperty("text", "Review failed: " + e.getMessage());
+                error.addProperty("text", errText);
                 room.broadcast(gson.toJson(error));
 
             } finally {
-                // Always release the lock so future reviews can proceed
+                // Always release the lock so future reviews can proceed,
+                // even if the room is now empty.
                 room.endReview();
             }
         });
@@ -372,11 +423,11 @@ public class CodeReviewServer extends WebSocketServer {
     }
 
     /**
-     * CURSOR  { "type": "CURSOR", "userId": "minh", "line": 7 }
+     * CURSOR  { "type": "CURSOR", "userId": "minh", "pos": 7 }
      *
-     * Stores the user's last known cursor line in the room so new joiners
+     * Stores the user's last known cursor position in the room so new joiners
      * receive it in SYNC, then broadcasts to every other client so they can
-     * render the colored cursor widget at the correct line.
+     * render the colored cursor widget at the correct position.
      */
     private void handleCursor(WebSocket conn, JsonObject msg) {
         if (!msg.has("userId") || !msg.has("pos")) return;
@@ -395,5 +446,139 @@ public class CodeReviewServer extends WebSocketServer {
         broadcast.addProperty("pos",    pos);
 
         room.broadcastExcept(conn, gson.toJson(broadcast));
+    }
+
+    /**
+     * CHAT  { "type": "CHAT", "userId": "minh", "text": "...", "replyTo": null }
+     *
+     * 1. Validate required fields.
+     * 2. Append the message to the room's persistent chat history so late
+     *    joiners receive it in SYNC.
+     * 3. Broadcast the CHAT message to every client in the room (including
+     *    the sender, so the sender sees their message in the shared history).
+     * 4. If the text contains "@ai" (case-insensitive), spawn a background
+     *    thread that calls Gemini with full room context and broadcasts the
+     *    response as an AI_CHAT message.
+     *
+     * Networking note: this is a simple store-and-forward pattern over the
+     * room's set of active TCP/WebSocket connections.
+     */
+    private void handleChat(WebSocket conn, JsonObject msg) {
+        if (!msg.has("userId") || !msg.has("text")) {
+            System.err.println("[handleChat] Missing userId or text.");
+            return;
+        }
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) {
+            System.err.println("[handleChat] CHAT from connection not in any room.");
+            return;
+        }
+
+        String userId  = msg.get("userId").getAsString();
+        String text    = msg.get("text").getAsString().trim();
+        int    replyTo = (msg.has("replyTo") && !msg.get("replyTo").isJsonNull())
+                         ? msg.get("replyTo").getAsInt() : -1;
+
+        if (text.isEmpty()) return;
+
+        // Persist to room history before broadcasting so that any concurrent
+        // SYNC (triggered by a join on another thread) sees this message too.
+        room.addChatMessage(userId, text, replyTo);
+
+        long timestamp = System.currentTimeMillis();
+
+        // Build the outbound CHAT frame and broadcast to all TCP connections.
+        JsonObject broadcast = new JsonObject();
+        broadcast.addProperty("type",      "CHAT");
+        broadcast.addProperty("userId",    userId);
+        broadcast.addProperty("text",      text);
+        broadcast.addProperty("timestamp", timestamp);
+        if (replyTo >= 0) {
+            broadcast.addProperty("replyTo", replyTo);
+        } else {
+            broadcast.add("replyTo", null);
+        }
+
+        room.broadcast(gson.toJson(broadcast));
+
+        System.out.println("[handleChat] '" + userId + "' in room '" + room.getRoomCode()
+                + "': " + text);
+
+        // @ai trigger — if the message mentions @ai, ask Gemini for a response.
+        // We snapshot all room state now so edits during the API call don't
+        // affect the context the AI was given.
+        if (text.toLowerCase().contains("@ai")) {
+            final String              docSnapshot     = room.getDocument();
+            final String              langSnapshot    = room.getLanguage();
+            final java.util.List<JsonObject> commentSnapshot = room.getComments();
+            final java.util.List<JsonObject> chatSnapshot    = room.getChatHistory();
+            final String              question        = text;
+
+            Thread aiThread = new Thread(() -> {
+                try {
+                    System.out.println("[aiChatThread] @ai triggered by '" + userId
+                            + "' in room '" + room.getRoomCode() + "'.");
+
+                    String aiResponse = gemini.chat(
+                        docSnapshot, langSnapshot, commentSnapshot, chatSnapshot, question
+                    );
+
+                    // Persist the AI's reply so late joiners see it in SYNC.
+                    room.addChatMessage("ai", aiResponse, -1);
+
+                    // Broadcast AI_CHAT to every client over their TCP connections.
+                    JsonObject aiChat = new JsonObject();
+                    aiChat.addProperty("type",      "AI_CHAT");
+                    aiChat.addProperty("text",      aiResponse);
+                    aiChat.addProperty("timestamp", System.currentTimeMillis());
+                    room.broadcast(gson.toJson(aiChat));
+
+                    System.out.println("[aiChatThread] AI response sent to room '"
+                            + room.getRoomCode() + "'.");
+
+                } catch (Exception e) {
+                    System.err.println("[aiChatThread] Gemini chat error: " + e.getMessage());
+
+                    JsonObject error = new JsonObject();
+                    error.addProperty("type", "AI_ERROR");
+                    error.addProperty("text", "AI chat failed: " + e.getMessage());
+                    room.broadcast(gson.toJson(error));
+                }
+            });
+
+            aiThread.setDaemon(true);
+            aiThread.setName("ai-chat-" + room.getRoomCode());
+            aiThread.start();
+        }
+    }
+
+    /**
+     * LANGUAGE_CHANGE  { "type": "LANGUAGE_CHANGE", "userId": "minh", "language": "python" }
+     *
+     * Updates the room's stored language and broadcasts the change to every
+     * client so their CodeMirror syntax highlighting switches in real time.
+     * The language is also included in future SYNC messages so late joiners
+     * start with the correct highlighting.
+     */
+    private void handleLanguageChange(WebSocket conn, JsonObject msg) {
+        if (!msg.has("language")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String language = msg.get("language").getAsString().trim();
+        String userId   = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        room.setLanguage(language);
+
+        JsonObject broadcast = new JsonObject();
+        broadcast.addProperty("type",     "LANGUAGE_CHANGE");
+        broadcast.addProperty("userId",   userId);
+        broadcast.addProperty("language", language);
+        room.broadcast(gson.toJson(broadcast));
+
+        System.out.println("[handleLanguageChange] Room '" + room.getRoomCode()
+                + "' language -> '" + language + "' (set by '" + userId + "').");
     }
 }

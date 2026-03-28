@@ -40,6 +40,10 @@ public class Room {
     // joins mid-session or after a review receives them in SYNC.
     private final List<JsonObject> comments = new ArrayList<>();
 
+    // Chat message history for this room.  Every CHAT message is appended here
+    // so late joiners receive the full conversation in SYNC.
+    private final List<JsonObject> chatHistory = new ArrayList<>();
+
     // Programming language for this room — used to build the Gemini prompt and
     // to tell the client which CodeMirror language extension to activate.
     private String language = "javascript";
@@ -152,6 +156,39 @@ public class Room {
     /** Clears previous review results before starting a new review. */
     public synchronized void clearComments() {
         comments.clear();
+    }
+
+    // -------------------------------------------------------------------------
+    // Chat history
+    // -------------------------------------------------------------------------
+
+    /**
+     * Appends one chat message to the room's persistent history.
+     * Called by handleChat before broadcasting so late joiners receive it in SYNC.
+     *
+     * @param userId    the sender's userId (or "system" for server notifications)
+     * @param text      the message body
+     * @param replyTo   index into chatHistory this message is replying to, or -1
+     */
+    public synchronized void addChatMessage(String userId, String text, int replyTo) {
+        JsonObject msg = new JsonObject();
+        msg.addProperty("userId",    userId);
+        msg.addProperty("text",      text);
+        msg.addProperty("timestamp", System.currentTimeMillis());
+        if (replyTo >= 0) {
+            msg.addProperty("replyTo", replyTo);
+        } else {
+            msg.add("replyTo", null);
+        }
+        chatHistory.add(msg);
+    }
+
+    /**
+     * Returns a snapshot of the full chat history (safe to iterate outside lock).
+     * Sent to new joiners in the SYNC message so they see prior conversation.
+     */
+    public synchronized List<JsonObject> getChatHistory() {
+        return new ArrayList<>(chatHistory);
     }
 
     // -------------------------------------------------------------------------
