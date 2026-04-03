@@ -123,6 +123,18 @@ export default function App() {
   const pendingCommentsRef = useRef(null)
   const pendingLanguageRef = useRef(null)
 
+  // Guard: prevents EDIT messages from being sent before the initial SYNC has
+  // been received and applied to the local editor.  Without this guard, a new
+  // joiner whose editor starts empty could send an EDIT that overwrites the
+  // room's document for everyone.
+  //
+  // Set to true when:
+  //   • SYNC is received and the document is applied via applyEditRef directly, OR
+  //   • SYNC was queued as pending and is applied inside onEditorReady.
+  // Reset to false on leave or reconnect so every new WebSocket session waits
+  // for its own SYNC before it can write.
+  const syncReceivedRef = useRef(false)
+
   // ── WebSocket connection ────────────────────────────────────────────────
 
   const connectWS = useCallback((userId, roomCode) => {
@@ -149,6 +161,9 @@ export default function App() {
   const handleReconnect = useCallback(() => {
     if (!session) return
     if (wsRef.current) wsRef.current.close()
+    // Reset sync guard so the reconnecting client waits for its fresh SYNC
+    // before it can send EDIT messages on the new TCP connection.
+    syncReceivedRef.current = false
     setComments([])
     setChat([])
     setReviewInProgress(false)
@@ -171,10 +186,22 @@ export default function App() {
         removeCursorRef.current?.(msg.userId)
         break
 
+      // SYNC is a unicast message sent by the server only to the newly-joining
+      // client.  It carries the full authoritative room state so the joiner
+      // starts in sync with everyone else.
+      //
+      // After applying (or staging) the document we mark syncReceivedRef=true
+      // so that onLocalChange is allowed to send EDIT messages.  This prevents
+      // the race where the new user types before their editor is populated and
+      // their EDIT (containing only their few keystrokes) wipes the room doc.
       case 'SYNC': {
         if (applyEditRef.current) {
+          // Editor already mounted — apply directly.
           applyEditRef.current(msg.document)
+          syncReceivedRef.current = true
         } else {
+          // Editor not mounted yet — stage for onEditorReady.
+          // syncReceivedRef will be set there after the document is applied.
           pendingEditRef.current = msg.document
         }
 
@@ -275,6 +302,20 @@ export default function App() {
   }
 
   // ── Editor ready callback ───────────────────────────────────────────────
+  //
+  // Called by Editor.jsx once the CodeMirror view is constructed and its
+  // imperative handles are available.  We apply any state that arrived over
+  // the WebSocket before the editor finished mounting.
+  //
+  // IMPORTANT — we intentionally do NOT clear the pending refs after applying
+  // them.  React.StrictMode double-invokes effects in development:
+  //   mount → cleanup (view destroyed) → remount
+  // If we cleared pendingEditRef.current on the first invocation, the second
+  // invocation (on the real, surviving view) would find null and leave the
+  // editor blank.  Keeping the values means both invocations apply the same
+  // content; the equality guard inside applyEdit makes the second apply a
+  // no-op when the content is unchanged, so there is no visible duplication.
+  // The pending refs are only truly cleared in handleLeave (session end).
 
   const onEditorReady = useCallback(({
     applyEdit, applyCursor, removeCursor, addComment, clearComments, setLanguage: setLang,
@@ -288,22 +329,25 @@ export default function App() {
 
     if (pendingEditRef.current !== null) {
       applyEdit(pendingEditRef.current)
-      pendingEditRef.current = null
+      // Mark sync as received now that the document has been applied to the
+      // editor.  From this point onLocalChange is allowed to send EDIT frames.
+      syncReceivedRef.current = true
+      // Intentionally NOT clearing pendingEditRef.current — see note above.
     }
     if (pendingCursorsRef.current !== null) {
       for (const [uid, pos] of Object.entries(pendingCursorsRef.current))
         applyCursor(uid, pos)
-      pendingCursorsRef.current = null
+      // Intentionally NOT clearing — see note above.
     }
     if (pendingCommentsRef.current !== null) {
       clearComments()
       for (const c of pendingCommentsRef.current)
         addComment(c.line, c.text, c.severity, c.category)
-      pendingCommentsRef.current = null
+      // Intentionally NOT clearing — see note above.
     }
     if (pendingLanguageRef.current !== null) {
       setLang(pendingLanguageRef.current)
-      pendingLanguageRef.current = null
+      // Intentionally NOT clearing — see note above.
     }
   }, [])
 
@@ -312,6 +356,11 @@ export default function App() {
   const onLocalChange = useCallback((content) => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
+    // Do not send EDIT until the initial SYNC has been received and its
+    // document has been applied to our local editor.  Before that point our
+    // editor is still empty; sending an EDIT now would broadcast empty (or
+    // partially-typed) content to all other clients, wiping their documents.
+    if (!syncReceivedRef.current) return
     ws.send(JSON.stringify({ type: 'EDIT', userId: session?.userId, content }))
   }, [session?.userId])
 
@@ -364,6 +413,7 @@ export default function App() {
     pendingCursorsRef.current    = null
     pendingCommentsRef.current   = null
     pendingLanguageRef.current   = null
+    syncReceivedRef.current      = false
     setSession(null)
     setUsers([])
     setStatus('')

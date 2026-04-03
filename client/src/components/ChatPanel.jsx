@@ -1,5 +1,22 @@
 import { useState, useRef, useEffect } from 'react'
 
+// Same palette and hash as UserList.jsx and Editor.jsx so a given username
+// always maps to the same color everywhere in the UI.
+const USER_COLORS = [
+  '#ef4444', '#f97316', '#f59e0b', '#eab308',
+  '#84cc16', '#22c55e', '#10b981', '#14b8a6',
+  '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1',
+  '#8b5cf6', '#a855f7', '#d946ef', '#ec4899',
+  '#f43f5e', '#fb923c', '#4ade80', '#818cf8',
+]
+
+function colorForUser(userId) {
+  let hash = 0
+  for (let i = 0; i < userId.length; i++)
+    hash = (hash * 31 + userId.charCodeAt(i)) & 0xffffffff
+  return USER_COLORS[Math.abs(hash) % USER_COLORS.length]
+}
+
 /**
  * ChatPanel — right sidebar showing the room chat.
  *
@@ -102,7 +119,10 @@ export default function ChatPanel({ chat, currentUserId, onSendChat, width, onCl
 
           return (
             <div key={i} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}>
-              <span className="text-[10px] text-gray-500 mb-0.5 px-1">
+              <span
+                className="text-[10px] mb-0.5 px-1"
+                style={{ color: isMine ? '#6b7280' : colorForUser(msg.userId) }}
+              >
                 {isMine ? 'You' : msg.userId}
               </span>
               <div

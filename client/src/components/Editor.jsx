@@ -23,8 +23,11 @@ function getLanguageExtension(lang) {
 // ── Shared helpers ────────────────────────────────────────────────────────
 
 const CURSOR_COLORS = [
-  '#6366f1', '#10b981', '#f43f5e', '#f59e0b',
-  '#0ea5e9', '#8b5cf6', '#ec4899', '#14b8a6',
+  '#ef4444', '#f97316', '#f59e0b', '#eab308',
+  '#84cc16', '#22c55e', '#10b981', '#14b8a6',
+  '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1',
+  '#8b5cf6', '#a855f7', '#d946ef', '#ec4899',
+  '#f43f5e', '#fb923c', '#4ade80', '#818cf8',
 ]
 
 function colorForUser(userId) {
