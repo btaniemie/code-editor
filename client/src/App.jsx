@@ -1,9 +1,12 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import JoinScreen    from './components/JoinScreen'
 import UserList      from './components/UserList'
 import Editor        from './components/Editor'
 import CommentsPanel from './components/CommentsPanel'
 import ChatPanel     from './components/ChatPanel'
+import FileExplorer  from './components/FileExplorer'
+import TabBar        from './components/TabBar'
+import Terminal      from './components/Terminal'
 
 const SERVER_URL = 'ws://localhost:8080'
 
@@ -13,9 +16,9 @@ const LANGUAGES = [
   { value: 'java',       label: 'Java'       },
 ]
 
-// ── Reusable SVG chevrons ───────────────────────────────────────────────────
+// ── Reusable SVG icons ─────────────────────────────────────────────────────
 
-function ChevronLeft() {
+function ChevronLeft()  {
   return (
     <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
       <path fillRule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clipRule="evenodd" />
@@ -31,7 +34,7 @@ function ChevronRight() {
   )
 }
 
-// ── Drag-to-resize handle ───────────────────────────────────────────────────
+// ── Drag-to-resize handle ──────────────────────────────────────────────────
 
 function DragHandle({ direction, onMove }) {
   const startDrag = (e) => {
@@ -63,7 +66,7 @@ function DragHandle({ direction, onMove }) {
   )
 }
 
-// ── Collapsed panel strip ───────────────────────────────────────────────────
+// ── Collapsed panel strip ──────────────────────────────────────────────────
 
 function CollapsedStrip({ side, label, onOpen }) {
   const isLeft = side === 'left'
@@ -88,6 +91,8 @@ function CollapsedStrip({ side, label, onOpen }) {
   )
 }
 
+// ── Main App ───────────────────────────────────────────────────────────────
+
 export default function App() {
   const [session,          setSession]          = useState(null)
   const [users,            setUsers]            = useState([])
@@ -97,45 +102,54 @@ export default function App() {
   const [chat,             setChat]             = useState([])
   const [language,         setLanguage]         = useState('javascript')
 
-  // Panel open/close
+  // ── Multi-file state ─────────────────────────────────────────────────────
+  // files: { [filename]: content }  — all files in the room
+  // openTabs: filename[]            — currently open editor tabs
+  // activeFile: filename            — file shown in the CodeMirror editor
+  const [files,      setFiles]      = useState({ 'main.js': '' })
+  const [openTabs,   setOpenTabs]   = useState(['main.js'])
+  const [activeFile, setActiveFile] = useState('main.js')
+
+  // Keep a ref so onLocalChange (which closes over session) always sees the
+  // current activeFile without needing to be re-created on every file switch.
+  const activeFileRef = useRef('main.js')
+  useEffect(() => { activeFileRef.current = activeFile }, [activeFile])
+
+  // ── Panel open/close ─────────────────────────────────────────────────────
   const [leftOpen,   setLeftOpen]   = useState(true)
   const [rightOpen,  setRightOpen]  = useState(true)
   const [bottomOpen, setBottomOpen] = useState(true)
+  const [bottomTab,  setBottomTab]  = useState('terminal') // 'terminal' | 'problems'
 
-  // Panel dimensions in pixels
+  // ── Panel dimensions ─────────────────────────────────────────────────────
   const [leftWidth,    setLeftWidth]    = useState(224)
   const [rightWidth,   setRightWidth]   = useState(288)
-  const [bottomHeight, setBottomHeight] = useState(176)
+  const [bottomHeight, setBottomHeight] = useState(220)
 
   const wsRef = useRef(null)
 
-  // Imperative CodeMirror handles
-  const applyEditRef        = useRef(null)
-  const applyCursorRef      = useRef(null)
-  const removeCursorRef     = useRef(null)
-  const addCommentRef       = useRef(null)
-  const clearCommentsRef    = useRef(null)
+  // ── Imperative CodeMirror handles ─────────────────────────────────────────
+  const applyEditRef         = useRef(null)
+  const applyCursorRef       = useRef(null)
+  const removeCursorRef      = useRef(null)
+  const addCommentRef        = useRef(null)
+  const clearCommentsRef     = useRef(null)
   const setEditorLanguageRef = useRef(null)
 
-  // Content that arrived before the editor mounted
+  // ── Imperative Terminal handles ───────────────────────────────────────────
+  const writeTerminalRef = useRef(null)
+  const fitTerminalRef   = useRef(null)
+
+  // ── Pending refs (messages that arrived before editor mounted) ────────────
   const pendingEditRef     = useRef(null)
   const pendingCursorsRef  = useRef(null)
   const pendingCommentsRef = useRef(null)
   const pendingLanguageRef = useRef(null)
 
-  // Guard: prevents EDIT messages from being sent before the initial SYNC has
-  // been received and applied to the local editor.  Without this guard, a new
-  // joiner whose editor starts empty could send an EDIT that overwrites the
-  // room's document for everyone.
-  //
-  // Set to true when:
-  //   • SYNC is received and the document is applied via applyEditRef directly, OR
-  //   • SYNC was queued as pending and is applied inside onEditorReady.
-  // Reset to false on leave or reconnect so every new WebSocket session waits
-  // for its own SYNC before it can write.
+  // Guard: do not send EDIT before the initial SYNC is applied.
   const syncReceivedRef = useRef(false)
 
-  // ── WebSocket connection ────────────────────────────────────────────────
+  // ── WebSocket connection ──────────────────────────────────────────────────
 
   const connectWS = useCallback((userId, roomCode) => {
     const ws = new WebSocket(SERVER_URL)
@@ -156,13 +170,11 @@ export default function App() {
     connectWS(userId, roomCode)
   }, [connectWS])
 
-  // ── Reconnect — reuse session, reset local state, open a fresh WebSocket ──
+  // ── Reconnect ──────────────────────────────────────────────────────────────
 
   const handleReconnect = useCallback(() => {
     if (!session) return
     if (wsRef.current) wsRef.current.close()
-    // Reset sync guard so the reconnecting client waits for its fresh SYNC
-    // before it can send EDIT messages on the new TCP connection.
     syncReceivedRef.current = false
     setComments([])
     setChat([])
@@ -171,7 +183,36 @@ export default function App() {
     connectWS(session.userId, session.roomCode)
   }, [session, connectWS])
 
-  // ── Client-side message router ──────────────────────────────────────────
+  // ── File switching ─────────────────────────────────────────────────────────
+  //
+  // When the user clicks a file in the explorer or a tab, we:
+  //   1. Open the tab if it isn't already open.
+  //   2. Set it as the active file.
+  //   3. Load that file's content into the CodeMirror editor via applyEdit.
+  //
+  // We do NOT send EDIT here — the editor content change is remote-applied so
+  // the update listener won't fire the local-change callback.
+
+  const switchToFile = useCallback((filename) => {
+    setOpenTabs(prev => prev.includes(filename) ? prev : [...prev, filename])
+    setActiveFile(filename)
+    // Load the file's content into the editor.  We read from the files state
+    // via a ref so this callback doesn't close over stale state.
+    // The actual apply happens in the effect below.
+  }, [])
+
+  // Apply editor content whenever activeFile changes.
+  // We use a ref to always read the latest files map.
+  const filesRef = useRef(files)
+  useEffect(() => { filesRef.current = files }, [files])
+
+  useEffect(() => {
+    if (applyEditRef.current) {
+      applyEditRef.current(filesRef.current[activeFile] ?? '')
+    }
+  }, [activeFile])
+
+  // ── Client-side message router ─────────────────────────────────────────────
 
   function handleMessage(msg, userId, roomCode) {
     switch (msg.type) {
@@ -186,23 +227,38 @@ export default function App() {
         removeCursorRef.current?.(msg.userId)
         break
 
-      // SYNC is a unicast message sent by the server only to the newly-joining
-      // client.  It carries the full authoritative room state so the joiner
-      // starts in sync with everyone else.
-      //
-      // After applying (or staging) the document we mark syncReceivedRef=true
-      // so that onLocalChange is allowed to send EDIT messages.  This prevents
-      // the race where the new user types before their editor is populated and
-      // their EDIT (containing only their few keystrokes) wipes the room doc.
+      // SYNC — full room state sent to newly-joining client.
+      // Now includes `files` map instead of a single `document` string.
       case 'SYNC': {
-        if (applyEditRef.current) {
-          // Editor already mounted — apply directly.
-          applyEditRef.current(msg.document)
-          syncReceivedRef.current = true
-        } else {
-          // Editor not mounted yet — stage for onEditorReady.
-          // syncReceivedRef will be set there after the document is applied.
-          pendingEditRef.current = msg.document
+        // Initialise file system from server state.
+        const serverFiles = msg.files ?? {}
+        const hasFiles    = Object.keys(serverFiles).length > 0
+
+        if (hasFiles) {
+          setFiles(serverFiles)
+          const firstFile = Object.keys(serverFiles)[0]
+
+          // Populate editor with the active (first) file.
+          if (applyEditRef.current) {
+            applyEditRef.current(serverFiles[firstFile] ?? '')
+            syncReceivedRef.current = true
+          } else {
+            pendingEditRef.current = serverFiles[firstFile] ?? ''
+          }
+
+          setActiveFile(firstFile)
+          setOpenTabs([firstFile])
+          activeFileRef.current = firstFile
+        } else if (msg.document != null) {
+          // Legacy fallback: server sent a single `document` field.
+          const legacyContent = msg.document
+          setFiles({ 'main.js': legacyContent })
+          if (applyEditRef.current) {
+            applyEditRef.current(legacyContent)
+            syncReceivedRef.current = true
+          } else {
+            pendingEditRef.current = legacyContent
+          }
         }
 
         if (msg.cursors && Object.keys(msg.cursors).length > 0) {
@@ -225,11 +281,8 @@ export default function App() {
           }
         }
 
-        if (msg.chat && msg.chat.length > 0) {
-          setChat(msg.chat)
-        }
+        if (msg.chat && msg.chat.length > 0) setChat(msg.chat)
 
-        // Restore the room's language — updates both React state and CodeMirror
         if (msg.language) {
           setLanguage(msg.language)
           if (setEditorLanguageRef.current) {
@@ -241,20 +294,74 @@ export default function App() {
         break
       }
 
-      case 'EDIT':
-        applyEditRef.current?.(msg.content)
+      // EDIT — another client changed a file.
+      // Update the files map; if they changed the active file, also apply to editor.
+      case 'EDIT': {
+        const filename = msg.filename ?? 'main.js'
+        const content  = msg.content
+        setFiles(prev => ({ ...prev, [filename]: content }))
+        if (filename === activeFileRef.current) {
+          applyEditRef.current?.(content)
+        }
         break
+      }
 
       case 'CURSOR':
         applyCursorRef.current?.(msg.userId, msg.pos)
         break
 
-      // A user changed the room's language — update highlighting for everyone
       case 'LANGUAGE_CHANGE':
         setLanguage(msg.language)
         setEditorLanguageRef.current?.(msg.language)
         break
 
+      // ── File system events ─────────────────────────────────────────────────
+      case 'FILE_CREATE': {
+        const { filename } = msg
+        setFiles(prev => ({ ...prev, [filename]: '' }))
+        break
+      }
+
+      case 'FILE_DELETE': {
+        const { filename } = msg
+        setFiles(prev => {
+          const next = { ...prev }
+          delete next[filename]
+          return next
+        })
+        setOpenTabs(prev => {
+          const remaining = prev.filter(t => t !== filename)
+          if (activeFileRef.current === filename && remaining.length > 0) {
+            const next = remaining[0]
+            setActiveFile(next)
+            activeFileRef.current = next
+            setTimeout(() => applyEditRef.current?.(filesRef.current[next] ?? ''), 0)
+          }
+          return remaining
+        })
+        break
+      }
+
+      case 'FILE_RENAME': {
+        const { oldName, newName } = msg
+        setFiles(prev => {
+          const next    = { ...prev }
+          const content = next[oldName] ?? ''
+          delete next[oldName]
+          next[newName] = content
+          return next
+        })
+        setOpenTabs(prev => prev.map(t => t === oldName ? newName : t))
+        setActiveFile(prev => prev === oldName ? newName : prev)
+        break
+      }
+
+      // ── Terminal output ────────────────────────────────────────────────────
+      case 'TERMINAL_OUTPUT':
+        writeTerminalRef.current?.(msg.data)
+        break
+
+      // ── AI review ─────────────────────────────────────────────────────────
       case 'REVIEW_START':
         setReviewInProgress(true)
         setComments([])
@@ -277,16 +384,16 @@ export default function App() {
         setStatus('AI error: ' + msg.text)
         break
 
+      // ── Chat ───────────────────────────────────────────────────────────────
       case 'CHAT': {
-        const chatMsg = {
+        setChat(prev => [...prev, {
           userId:    msg.userId,
           text:      msg.text,
           timestamp: msg.timestamp,
           replyTo:   msg.replyTo ?? null,
           system:    msg.userId === 'system',
           private:   msg.private ?? false,
-        }
-        setChat(prev => [...prev, chatMsg])
+        }])
         break
       }
 
@@ -303,21 +410,7 @@ export default function App() {
     }
   }
 
-  // ── Editor ready callback ───────────────────────────────────────────────
-  //
-  // Called by Editor.jsx once the CodeMirror view is constructed and its
-  // imperative handles are available.  We apply any state that arrived over
-  // the WebSocket before the editor finished mounting.
-  //
-  // IMPORTANT — we intentionally do NOT clear the pending refs after applying
-  // them.  React.StrictMode double-invokes effects in development:
-  //   mount → cleanup (view destroyed) → remount
-  // If we cleared pendingEditRef.current on the first invocation, the second
-  // invocation (on the real, surviving view) would find null and leave the
-  // editor blank.  Keeping the values means both invocations apply the same
-  // content; the equality guard inside applyEdit makes the second apply a
-  // no-op when the content is unchanged, so there is no visible duplication.
-  // The pending refs are only truly cleared in handleLeave (session end).
+  // ── Editor ready callback ─────────────────────────────────────────────────
 
   const onEditorReady = useCallback(({
     applyEdit, applyCursor, removeCursor, addComment, clearComments, setLanguage: setLang,
@@ -331,39 +424,49 @@ export default function App() {
 
     if (pendingEditRef.current !== null) {
       applyEdit(pendingEditRef.current)
-      // Mark sync as received now that the document has been applied to the
-      // editor.  From this point onLocalChange is allowed to send EDIT frames.
       syncReceivedRef.current = true
-      // Intentionally NOT clearing pendingEditRef.current — see note above.
     }
     if (pendingCursorsRef.current !== null) {
       for (const [uid, pos] of Object.entries(pendingCursorsRef.current))
         applyCursor(uid, pos)
-      // Intentionally NOT clearing — see note above.
     }
     if (pendingCommentsRef.current !== null) {
       clearComments()
       for (const c of pendingCommentsRef.current)
         addComment(c.line, c.text, c.severity, c.category)
-      // Intentionally NOT clearing — see note above.
     }
     if (pendingLanguageRef.current !== null) {
       setLang(pendingLanguageRef.current)
-      // Intentionally NOT clearing — see note above.
     }
   }, [])
 
-  // ── Outbound message senders ────────────────────────────────────────────
+  // ── Terminal ready callback ───────────────────────────────────────────────
+
+  const onTerminalReady = useCallback(({ write, fit }) => {
+    writeTerminalRef.current = write
+    fitTerminalRef.current   = fit
+
+    // Tell the server to start the shell process.
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'TERMINAL_OPEN' }))
+    }
+  }, [])
+
+  // ── Outbound senders ──────────────────────────────────────────────────────
 
   const onLocalChange = useCallback((content) => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    // Do not send EDIT until the initial SYNC has been received and its
-    // document has been applied to our local editor.  Before that point our
-    // editor is still empty; sending an EDIT now would broadcast empty (or
-    // partially-typed) content to all other clients, wiping their documents.
     if (!syncReceivedRef.current) return
-    ws.send(JSON.stringify({ type: 'EDIT', userId: session?.userId, content }))
+    // Also persist to local files state so switching tabs doesn't lose work.
+    setFiles(prev => ({ ...prev, [activeFileRef.current]: content }))
+    ws.send(JSON.stringify({
+      type:     'EDIT',
+      userId:   session?.userId,
+      filename: activeFileRef.current,
+      content,
+    }))
   }, [session?.userId])
 
   const onCursorMove = useCallback((pos) => {
@@ -372,8 +475,6 @@ export default function App() {
     ws.send(JSON.stringify({ type: 'CURSOR', userId: session?.userId, pos }))
   }, [session?.userId])
 
-  // Language change: update locally immediately, then tell the server so all
-  // other clients in the room get a LANGUAGE_CHANGE broadcast.
   const handleLanguageChange = useCallback((lang) => {
     setLanguage(lang)
     setEditorLanguageRef.current?.(lang)
@@ -389,7 +490,8 @@ export default function App() {
     ws.send(JSON.stringify({
       type:     'REVIEW_REQUEST',
       userId:   session?.userId,
-      language,          // send current room language, not hardcoded 'javascript'
+      filename: activeFileRef.current,
+      language,
     }))
   }, [session?.userId, language])
 
@@ -398,6 +500,75 @@ export default function App() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ type: 'CHAT', userId: session?.userId, text, replyTo: null }))
   }, [session?.userId])
+
+  // ── File operations ───────────────────────────────────────────────────────
+
+  const handleFileCreate = useCallback((filename) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'FILE_CREATE', userId: session?.userId, filename }))
+    // Optimistically open the new file locally.
+    setFiles(prev => ({ ...prev, [filename]: '' }))
+    setOpenTabs(prev => [...prev, filename])
+    setActiveFile(filename)
+  }, [session?.userId])
+
+  const handleFileDelete = useCallback((filename) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'FILE_DELETE', userId: session?.userId, filename }))
+    // Optimistically remove locally.
+    setFiles(prev => {
+      const next = { ...prev }
+      delete next[filename]
+      return next
+    })
+    setOpenTabs(prev => {
+      const remaining = prev.filter(t => t !== filename)
+      if (activeFileRef.current === filename && remaining.length > 0) {
+        const next = remaining[0]
+        setActiveFile(next)
+        activeFileRef.current = next
+        setTimeout(() => applyEditRef.current?.(filesRef.current[next] ?? ''), 0)
+      }
+      return remaining
+    })
+  }, [session?.userId])
+
+  const handleFileRename = useCallback((oldName, newName) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'FILE_RENAME', userId: session?.userId, oldName, newName }))
+    // Optimistically rename locally.
+    setFiles(prev => {
+      const next    = { ...prev }
+      const content = next[oldName] ?? ''
+      delete next[oldName]
+      next[newName] = content
+      return next
+    })
+    setOpenTabs(prev => prev.map(t => t === oldName ? newName : t))
+    if (activeFileRef.current === oldName) {
+      setActiveFile(newName)
+      activeFileRef.current = newName
+    }
+  }, [session?.userId])
+
+  const handleTabClose = useCallback((filename) => {
+    setOpenTabs(prev => {
+      if (prev.length <= 1) return prev // can't close last tab
+      const remaining = prev.filter(t => t !== filename)
+      if (activeFileRef.current === filename) {
+        const next = remaining[0]
+        setActiveFile(next)
+        activeFileRef.current = next
+        setTimeout(() => applyEditRef.current?.(filesRef.current[next] ?? ''), 0)
+      }
+      return remaining
+    })
+  }, [])
+
+  // ── Leave ─────────────────────────────────────────────────────────────────
 
   const handleLeave = useCallback(() => {
     if (wsRef.current) {
@@ -411,6 +582,8 @@ export default function App() {
     addCommentRef.current        = null
     clearCommentsRef.current     = null
     setEditorLanguageRef.current = null
+    writeTerminalRef.current     = null
+    fitTerminalRef.current       = null
     pendingEditRef.current       = null
     pendingCursorsRef.current    = null
     pendingCommentsRef.current   = null
@@ -423,27 +596,32 @@ export default function App() {
     setReviewInProgress(false)
     setChat([])
     setLanguage('javascript')
+    setFiles({ 'main.js': '' })
+    setOpenTabs(['main.js'])
+    setActiveFile('main.js')
+    activeFileRef.current = 'main.js'
   }, [])
 
-  // ── Render ──────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
 
-  if (!session) {
-    return <JoinScreen onJoin={handleJoin} />
-  }
+  if (!session) return <JoinScreen onJoin={handleJoin} />
 
   const isDisconnected = status === 'Disconnected' || status === 'Connection error'
+
+  // Bottom panel content height (subtract the 32px tab bar)
+  const bottomContentHeight = Math.max(bottomHeight - 32, 60)
 
   return (
     <div className="flex h-screen bg-gray-950 text-gray-100 overflow-hidden">
 
-      {/* ── Left sidebar or collapsed strip ── */}
+      {/* ── Left sidebar ───────────────────────────────────────────────────── */}
       {leftOpen ? (
         <>
           <aside
             style={{ width: leftWidth }}
             className="flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden"
           >
-            {/* Room header + close button */}
+            {/* Room header + close */}
             <div className="px-4 py-3 border-b border-gray-800 flex-shrink-0 flex items-start justify-between">
               <div className="min-w-0">
                 <p className="text-xs text-gray-400 uppercase tracking-widest">Room</p>
@@ -458,6 +636,20 @@ export default function App() {
               </button>
             </div>
 
+            {/* File Explorer — takes up the bulk of the sidebar */}
+            <FileExplorer
+              files={files}
+              activeFile={activeFile}
+              onFileSelect={switchToFile}
+              onFileCreate={handleFileCreate}
+              onFileDelete={handleFileDelete}
+              onFileRename={handleFileRename}
+            />
+
+            {/* Divider */}
+            <div className="border-t border-gray-800 flex-shrink-0" />
+
+            {/* Users */}
             <UserList users={users} currentUserId={session.userId} />
 
             {/* Language selector */}
@@ -467,8 +659,7 @@ export default function App() {
                 value={language}
                 onChange={e => handleLanguageChange(e.target.value)}
                 className="w-full bg-gray-800 text-gray-200 text-xs rounded px-2.5 py-1.5
-                           border border-gray-700 outline-none focus:border-emerald-600
-                           cursor-pointer"
+                           border border-gray-700 outline-none focus:border-emerald-600 cursor-pointer"
               >
                 {LANGUAGES.map(l => (
                   <option key={l.value} value={l.value}>{l.label}</option>
@@ -476,7 +667,7 @@ export default function App() {
               </select>
             </div>
 
-            {/* Request Review button */}
+            {/* Request Review */}
             <div className="px-4 pb-3 flex-shrink-0">
               <button
                 onClick={handleRequestReview}
@@ -492,14 +683,12 @@ export default function App() {
                     <span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-emerald-400 rounded-full animate-spin" />
                     Reviewing…
                   </span>
-                ) : (
-                  'Request AI Review'
-                )}
+                ) : 'Request AI Review'}
               </button>
             </div>
 
-            {/* Status + reconnect + leave */}
-            <div className="px-4 py-3 border-t border-gray-800 space-y-2 flex-shrink-0 mt-auto">
+            {/* Status / reconnect / leave */}
+            <div className="px-4 py-3 border-t border-gray-800 space-y-2 flex-shrink-0">
               <p className={`text-xs truncate ${isDisconnected ? 'text-red-400' : 'text-gray-500'}`}>
                 {status}
               </p>
@@ -520,17 +709,24 @@ export default function App() {
             </div>
           </aside>
 
-          <DragHandle
-            direction="vertical"
-            onMove={(x) => setLeftWidth(Math.max(160, Math.min(360, x)))}
-          />
+          <DragHandle direction="vertical" onMove={(x) => setLeftWidth(Math.max(160, Math.min(400, x)))} />
         </>
       ) : (
-        <CollapsedStrip side="left" label="Room" onOpen={() => setLeftOpen(true)} />
+        <CollapsedStrip side="left" label="Explorer" onOpen={() => setLeftOpen(true)} />
       )}
 
-      {/* ── Center column — editor + AI comments strip ── */}
+      {/* ── Center column ──────────────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+
+        {/* Tab bar */}
+        <TabBar
+          tabs={openTabs}
+          activeFile={activeFile}
+          onTabSelect={switchToFile}
+          onTabClose={handleTabClose}
+        />
+
+        {/* Editor — fills remaining space above bottom panel */}
         <main className="flex-1 overflow-hidden min-h-0">
           <Editor
             onLocalChange={onLocalChange}
@@ -540,23 +736,88 @@ export default function App() {
           />
         </main>
 
+        {/* Bottom panel drag handle */}
         {bottomOpen && (
           <DragHandle
             direction="horizontal"
-            onMove={(_, y) => setBottomHeight(Math.max(80, Math.min(450, window.innerHeight - y)))}
+            onMove={(_, y) => setBottomHeight(Math.max(80, Math.min(600, window.innerHeight - y)))}
           />
         )}
 
-        <CommentsPanel
-          comments={comments}
-          reviewInProgress={reviewInProgress}
-          open={bottomOpen}
-          height={bottomHeight}
-          onToggle={() => setBottomOpen(o => !o)}
-        />
+        {/* Bottom panel: Terminal + AI Review tabs */}
+        {bottomOpen && (
+          <div style={{ height: bottomHeight }} className="flex flex-col flex-shrink-0 bg-gray-950 border-t border-gray-800">
+            {/* Tab bar */}
+            <div className="flex items-center border-b border-gray-800 flex-shrink-0" style={{ height: 32 }}>
+              <button
+                onClick={() => { setBottomTab('terminal'); setTimeout(() => fitTerminalRef.current?.(), 50) }}
+                className={`px-4 h-full text-xs uppercase tracking-widest transition-colors border-r border-gray-800
+                  ${bottomTab === 'terminal'
+                    ? 'text-emerald-400 border-t-2 border-t-emerald-500 bg-gray-900'
+                    : 'text-gray-500 hover:text-gray-300'}`}
+              >
+                Terminal
+              </button>
+              <button
+                onClick={() => setBottomTab('problems')}
+                className={`px-4 h-full text-xs uppercase tracking-widest transition-colors border-r border-gray-800
+                  ${bottomTab === 'problems'
+                    ? 'text-emerald-400 border-t-2 border-t-emerald-500 bg-gray-900'
+                    : 'text-gray-500 hover:text-gray-300'}`}
+              >
+                Problems {comments.length > 0 && `(${comments.length})`}
+              </button>
+              {/* Spacer + close */}
+              <div className="flex-1" />
+              <button
+                onClick={() => setBottomOpen(false)}
+                className="px-3 h-full text-gray-600 hover:text-gray-300 transition-colors"
+                title="Close panel"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Panel content — both mounted, toggled via CSS so xterm stays alive */}
+            <div className="flex-1 overflow-hidden relative">
+              <div style={{ display: bottomTab === 'terminal' ? 'block' : 'none', height: '100%' }}>
+                <Terminal
+                  wsRef={wsRef}
+                  onReady={onTerminalReady}
+                />
+              </div>
+              <div style={{ display: bottomTab === 'problems' ? 'block' : 'none', height: '100%', overflowY: 'auto' }}>
+                <CommentsPanel
+                  comments={comments}
+                  reviewInProgress={reviewInProgress}
+                  open={true}
+                  height={bottomContentHeight}
+                  onToggle={() => {}}
+                  embedded={true}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Reopen bottom panel strip when closed */}
+        {!bottomOpen && (
+          <div
+            className="h-7 flex-shrink-0 bg-gray-950 border-t border-gray-800 flex items-center px-3 gap-2
+                       cursor-pointer hover:bg-gray-900/60 transition-colors"
+            onClick={() => setBottomOpen(true)}
+          >
+            <svg className="w-3.5 h-3.5 text-gray-600" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+            <span className="text-xs text-gray-600 uppercase tracking-widest">Terminal / Problems</span>
+          </div>
+        )}
       </div>
 
-      {/* ── Right sidebar or collapsed strip ── */}
+      {/* ── Right sidebar ──────────────────────────────────────────────────── */}
       {rightOpen ? (
         <>
           <DragHandle

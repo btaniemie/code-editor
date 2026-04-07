@@ -3,12 +3,16 @@ package com.codereview;
 import com.google.gson.JsonObject;
 import org.java_websocket.WebSocket;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Represents one collaborative room. Holds the set of active TCP connections
@@ -24,49 +28,137 @@ public class Room {
     private final String roomCode;
 
     // Maps each live WebSocket connection -> the userId that sent USER_JOIN on it.
-    // Using a plain HashMap protected by synchronized blocks so the locking is
-    // explicit and visible to the reader (important for the course context).
     private final Map<WebSocket, String> connections = new HashMap<>();
 
-    // Shared document content for this room.  Every EDIT message from any client
-    // updates this field (synchronized); every new joiner receives it in SYNC.
-    private String document = "";
+    // Virtual file system: filename → content.
+    // LinkedHashMap preserves insertion order so the first file is always the default.
+    // All access is synchronized; callers receive defensive copies.
+    private final Map<String, String> files = new LinkedHashMap<>();
 
-    // Last known cursor line for each userId.  Ephemeral — sent to new joiners
-    // in SYNC so they can see where everyone already is.
+    // Last known cursor character offset for each userId.
     private final Map<String, Integer> cursors = new HashMap<>();
 
-    // AI review comments accumulated for this room.  Persisted so a user who
-    // joins mid-session or after a review receives them in SYNC.
+    // AI review comments accumulated for this room.
     private final List<JsonObject> comments = new ArrayList<>();
 
-    // Chat message history for this room.  Every CHAT message is appended here
-    // so late joiners receive the full conversation in SYNC.
+    // Chat message history for this room.
     private final List<JsonObject> chatHistory = new ArrayList<>();
 
-    // Programming language for this room — used to build the Gemini prompt and
-    // to tell the client which CodeMirror language extension to activate.
+    // Programming language for syntax highlighting and Gemini prompts.
     private String language = "javascript";
 
     // Prevents two clients from triggering simultaneous reviews.
-    // Volatile so the background review thread's write is immediately visible
-    // to the WebSocket handler threads without a full synchronized block.
     private volatile boolean reviewInProgress = false;
+
+    // ── Terminal process ──────────────────────────────────────────────────────
+
+    private Process       terminalProcess = null;
+    private OutputStream  terminalStdin   = null;
 
     public Room(String roomCode) {
         this.roomCode = roomCode;
+        // Every new room starts with one default file.
+        files.put("main.js", "");
     }
 
+    // ── File system ───────────────────────────────────────────────────────────
+
+    /** Creates a file with the given name if it does not already exist. */
+    public synchronized boolean createFile(String filename) {
+        if (files.containsKey(filename)) return false;
+        files.put(filename, "");
+        return true;
+    }
+
+    /**
+     * Removes a file.  Returns false if the file did not exist or it is the
+     * last remaining file (we always keep at least one).
+     */
+    public synchronized boolean deleteFile(String filename) {
+        if (!files.containsKey(filename) || files.size() <= 1) return false;
+        files.remove(filename);
+        return true;
+    }
+
+    /**
+     * Renames oldName to newName.  Returns false if the source does not exist
+     * or the destination already exists.
+     */
+    public synchronized boolean renameFile(String oldName, String newName) {
+        if (!files.containsKey(oldName) || files.containsKey(newName)) return false;
+        String content = files.remove(oldName);
+        files.put(newName, content);
+        return true;
+    }
+
+    /** Returns a snapshot of all filename → content entries. */
+    public synchronized Map<String, String> getFiles() {
+        return new LinkedHashMap<>(files);
+    }
+
+    /** Returns the content of one file, or empty string if not found. */
+    public synchronized String getFileContent(String filename) {
+        return files.getOrDefault(filename, "");
+    }
+
+    /** Updates the content of one file (creates it if it doesn't exist). */
+    public synchronized void setFileContent(String filename, String content) {
+        files.put(filename, content);
+    }
+
+    /** Returns true if the file exists in this room. */
+    public synchronized boolean hasFile(String filename) {
+        return files.containsKey(filename);
+    }
+
+    /**
+     * Returns the content of the first file (used by Gemini review when no
+     * explicit filename is given by the client).
+     */
     public synchronized String getDocument() {
-        return document;
+        if (files.isEmpty()) return "";
+        return files.values().iterator().next();
     }
 
+    /**
+     * Legacy setter — only kept so existing EDIT handler code that has not yet
+     * been updated continues to compile.  New code should call setFileContent.
+     */
     public synchronized void setDocument(String doc) {
-        this.document = doc;
+        if (!files.isEmpty()) {
+            String first = files.keySet().iterator().next();
+            files.put(first, doc);
+        }
     }
 
-    public synchronized void setCursor(String userId, int line) {
-        cursors.put(userId, line);
+    // ── Connections ───────────────────────────────────────────────────────────
+
+    public synchronized void addConnection(WebSocket conn, String userId) {
+        connections.put(conn, userId);
+    }
+
+    public synchronized String removeConnection(WebSocket conn) {
+        return connections.remove(conn);
+    }
+
+    public synchronized boolean isEmpty() {
+        return connections.isEmpty();
+    }
+
+    public synchronized Collection<String> getUserIds() {
+        return Collections.unmodifiableCollection(connections.values());
+    }
+
+    public synchronized boolean containsConnection(WebSocket conn) {
+        return connections.containsKey(conn);
+    }
+
+    public String getRoomCode() { return roomCode; }
+
+    // ── Cursors ───────────────────────────────────────────────────────────────
+
+    public synchronized void setCursor(String userId, int pos) {
+        cursors.put(userId, pos);
     }
 
     public synchronized Map<String, Integer> getCursors() {
@@ -77,66 +169,14 @@ public class Room {
         cursors.remove(userId);
     }
 
-    public String getRoomCode() {
-        return roomCode;
-    }
+    // ── Language ──────────────────────────────────────────────────────────────
 
-    /**
-     * Register a new connection in this room.
-     */
-    public synchronized void addConnection(WebSocket conn, String userId) {
-        connections.put(conn, userId);
-    }
+    public synchronized String getLanguage() { return language; }
 
-    /**
-     * Remove a connection (called on disconnect or explicit USER_LEAVE).
-     * Returns the userId that was on this connection, or null if unknown.
-     */
-    public synchronized String removeConnection(WebSocket conn) {
-        return connections.remove(conn);
-    }
+    public synchronized void setLanguage(String language) { this.language = language; }
 
-    /**
-     * Returns true if no connections remain (room can be garbage-collected).
-     */
-    public synchronized boolean isEmpty() {
-        return connections.isEmpty();
-    }
+    // ── AI review comments ────────────────────────────────────────────────────
 
-    /**
-     * Returns a snapshot of all userIds currently in the room.
-     */
-    public synchronized Collection<String> getUserIds() {
-        return Collections.unmodifiableCollection(connections.values());
-    }
-
-    /**
-     * Returns true if the given connection is currently registered in this room.
-     */
-    public synchronized boolean containsConnection(WebSocket conn) {
-        return connections.containsKey(conn);
-    }
-
-    // -------------------------------------------------------------------------
-    // Language
-    // -------------------------------------------------------------------------
-
-    public synchronized String getLanguage() {
-        return language;
-    }
-
-    public synchronized void setLanguage(String language) {
-        this.language = language;
-    }
-
-    // -------------------------------------------------------------------------
-    // AI review comments
-    // -------------------------------------------------------------------------
-
-    /**
-     * Appends one AI comment to the room's persistent comment list.
-     * Called from the background review thread after each Gemini response item.
-     */
     public synchronized void addComment(int line, String text, String severity, String category) {
         JsonObject comment = new JsonObject();
         comment.addProperty("line",     line);
@@ -146,30 +186,16 @@ public class Room {
         comments.add(comment);
     }
 
-    /**
-     * Returns a snapshot of all accumulated comments (safe to iterate outside lock).
-     */
     public synchronized List<JsonObject> getComments() {
         return new ArrayList<>(comments);
     }
 
-    /** Clears previous review results before starting a new review. */
     public synchronized void clearComments() {
         comments.clear();
     }
 
-    // -------------------------------------------------------------------------
-    // Chat history
-    // -------------------------------------------------------------------------
+    // ── Chat history ──────────────────────────────────────────────────────────
 
-    /**
-     * Appends one chat message to the room's persistent history.
-     * Called by handleChat before broadcasting so late joiners receive it in SYNC.
-     *
-     * @param userId    the sender's userId (or "system" for server notifications)
-     * @param text      the message body
-     * @param replyTo   index into chatHistory this message is replying to, or -1
-     */
     public synchronized void addChatMessage(String userId, String text, int replyTo) {
         JsonObject msg = new JsonObject();
         msg.addProperty("userId",    userId);
@@ -183,60 +209,103 @@ public class Room {
         chatHistory.add(msg);
     }
 
-    /**
-     * Returns a snapshot of the full chat history (safe to iterate outside lock).
-     * Sent to new joiners in the SYNC message so they see prior conversation.
-     */
     public synchronized List<JsonObject> getChatHistory() {
         return new ArrayList<>(chatHistory);
     }
 
-    // -------------------------------------------------------------------------
-    // Review-in-progress guard
-    // -------------------------------------------------------------------------
+    // ── Review lock ───────────────────────────────────────────────────────────
 
-    /**
-     * Atomically transitions reviewInProgress false -> true.
-     * Returns true if the caller won the race and should proceed with the review;
-     * false if a review is already running and this request should be dropped.
-     */
     public synchronized boolean startReview() {
         if (reviewInProgress) return false;
         reviewInProgress = true;
         return true;
     }
 
-    /** Called in the background thread's finally block to release the lock. */
     public synchronized void endReview() {
         reviewInProgress = false;
     }
 
-    // -------------------------------------------------------------------------
-    // Broadcast helpers
-    // -------------------------------------------------------------------------
+    // ── Terminal ──────────────────────────────────────────────────────────────
 
     /**
-     * Send a JSON message to every open connection in this room.
-     * Called "broadcast" to make the networking intent explicit.
+     * Spawns a /bin/bash process for this room if one is not already running.
+     * The outputBroadcaster callback is invoked on every chunk of stdout/stderr
+     * so the caller can broadcast it to all clients as TERMINAL_OUTPUT.
      */
-    public synchronized void broadcast(String json) {
-        for (WebSocket conn : connections.keySet()) {
-            if (conn.isOpen()) {
-                conn.send(json);   // frames the payload as a WebSocket text frame over TCP
-            }
+    public synchronized void startTerminal(Consumer<String> outputBroadcaster) {
+        if (terminalProcess != null && terminalProcess.isAlive()) return;
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder("/bin/bash", "--login");
+            pb.redirectErrorStream(true);                    // merge stderr into stdout
+            pb.environment().put("TERM", "xterm-256color");
+            pb.environment().put("COLUMNS", "220");
+            pb.environment().put("LINES", "30");
+
+            terminalProcess = pb.start();
+            terminalStdin   = terminalProcess.getOutputStream();
+
+            // Background thread: read process output and broadcast to clients.
+            Thread reader = new Thread(() -> {
+                byte[] buf = new byte[4096];
+                try (var stream = terminalProcess.getInputStream()) {
+                    int n;
+                    while ((n = stream.read(buf)) != -1) {
+                        String chunk = new String(buf, 0, n);
+                        outputBroadcaster.accept(chunk);
+                    }
+                } catch (IOException e) {
+                    // process ended — normal shutdown
+                }
+            });
+            reader.setDaemon(true);
+            reader.setName("terminal-out-" + roomCode);
+            reader.start();
+
+            System.out.println("[Terminal] Started /bin/bash for room '" + roomCode + "'.");
+        } catch (IOException e) {
+            System.err.println("[Terminal] Failed to start /bin/bash: " + e.getMessage());
         }
     }
 
-    /**
-     * Same as broadcast but skips one connection — used to avoid echoing a
-     * message back to the sender.
-     */
+    /** Returns true if the terminal process is running. */
+    public synchronized boolean isTerminalRunning() {
+        return terminalProcess != null && terminalProcess.isAlive();
+    }
+
+    /** Writes raw bytes to the terminal's stdin (user keystrokes from the client). */
+    public synchronized void writeToTerminal(String data) {
+        if (terminalStdin == null || terminalProcess == null || !terminalProcess.isAlive()) return;
+        try {
+            terminalStdin.write(data.getBytes());
+            terminalStdin.flush();
+        } catch (IOException e) {
+            System.err.println("[Terminal] Write error: " + e.getMessage());
+        }
+    }
+
+    /** Kills the terminal process (called when the room is destroyed). */
+    public synchronized void stopTerminal() {
+        if (terminalProcess != null) {
+            terminalProcess.destroyForcibly();
+            terminalProcess = null;
+            terminalStdin   = null;
+            System.out.println("[Terminal] Stopped for room '" + roomCode + "'.");
+        }
+    }
+
+    // ── Broadcast helpers ─────────────────────────────────────────────────────
+
+    public synchronized void broadcast(String json) {
+        for (WebSocket conn : connections.keySet()) {
+            if (conn.isOpen()) conn.send(json);
+        }
+    }
+
     public synchronized void broadcastExcept(WebSocket except, String json) {
         for (Map.Entry<WebSocket, String> entry : connections.entrySet()) {
             WebSocket conn = entry.getKey();
-            if (conn != except && conn.isOpen()) {
-                conn.send(json);
-            }
+            if (conn != except && conn.isOpen()) conn.send(json);
         }
     }
 }

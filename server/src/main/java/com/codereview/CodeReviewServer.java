@@ -111,13 +111,18 @@ public class CodeReviewServer extends WebSocketServer {
         // Message router — each case corresponds to one opcode in our
         // application-layer protocol.
         switch (type) {
-            case "USER_JOIN"      -> handleUserJoin(conn, msg);
-            case "USER_LEAVE"     -> handleUserLeave(conn, msg);
-            case "EDIT"           -> handleEdit(conn, msg);
-            case "CURSOR"         -> handleCursor(conn, msg);
-            case "REVIEW_REQUEST" -> handleReviewRequest(conn, msg);
+            case "USER_JOIN"       -> handleUserJoin(conn, msg);
+            case "USER_LEAVE"      -> handleUserLeave(conn, msg);
+            case "EDIT"            -> handleEdit(conn, msg);
+            case "CURSOR"          -> handleCursor(conn, msg);
+            case "REVIEW_REQUEST"  -> handleReviewRequest(conn, msg);
             case "CHAT"            -> handleChat(conn, msg);
             case "LANGUAGE_CHANGE" -> handleLanguageChange(conn, msg);
+            case "FILE_CREATE"     -> handleFileCreate(conn, msg);
+            case "FILE_DELETE"     -> handleFileDelete(conn, msg);
+            case "FILE_RENAME"     -> handleFileRename(conn, msg);
+            case "TERMINAL_OPEN"   -> handleTerminalOpen(conn);
+            case "TERMINAL_INPUT"  -> handleTerminalInput(conn, msg);
             default                -> System.out.println("[onMessage] Unknown message type: " + type);
         }
     }
@@ -185,8 +190,8 @@ public class CodeReviewServer extends WebSocketServer {
         // (unicast, not broadcast) so they start in sync with everyone else.
         JsonObject sync = new JsonObject();
         sync.addProperty("type",     "SYNC");
-        sync.addProperty("document", room.getDocument());
         sync.addProperty("language", room.getLanguage());
+        sync.add("files",    gson.toJsonTree(room.getFiles()));
         sync.add("users",    gson.toJsonTree(users));
         sync.add("cursors",  gson.toJsonTree(room.getCursors()));
         sync.add("comments", gson.toJsonTree(room.getComments()));
@@ -229,17 +234,25 @@ public class CodeReviewServer extends WebSocketServer {
             return;
         }
 
-        String content = msg.get("content").getAsString();
-        String userId  = msg.get("userId").getAsString();
+        String content  = msg.get("content").getAsString();
+        String userId   = msg.get("userId").getAsString();
+        // filename is required for multi-file support; fall back to first file.
+        String filename = msg.has("filename") ? msg.get("filename").getAsString() : null;
 
-        // Persist the new document state in the room (thread-safe via synchronized).
-        room.setDocument(content);
+        if (filename == null || filename.isBlank()) {
+            // Legacy clients or first-file editors — write to first file.
+            room.setDocument(content);
+            filename = room.getFiles().keySet().stream().findFirst().orElse("main.js");
+        } else {
+            room.setFileContent(filename, content);
+        }
 
-        // Forward to all other clients in the room over their TCP connections.
+        // Forward to all other clients so they can update the correct file.
         JsonObject fwd = new JsonObject();
-        fwd.addProperty("type",    "EDIT");
-        fwd.addProperty("userId",  userId);
-        fwd.addProperty("content", content);
+        fwd.addProperty("type",     "EDIT");
+        fwd.addProperty("userId",   userId);
+        fwd.addProperty("filename", filename);
+        fwd.addProperty("content",  content);
 
         room.broadcastExcept(conn, gson.toJson(fwd));
     }
@@ -351,9 +364,11 @@ public class CodeReviewServer extends WebSocketServer {
         start.addProperty("type", "REVIEW_START");
         room.broadcast(gson.toJson(start));
 
-        // Snapshot document state now — edits that arrive during the review
-        // do not affect what Gemini sees, keeping the comments consistent.
-        final String documentSnapshot = room.getDocument();
+        // Snapshot the requested file's content (or the first file as fallback).
+        final String filename         = (msg.has("filename") && !msg.get("filename").getAsString().isBlank())
+                                        ? msg.get("filename").getAsString()
+                                        : room.getFiles().keySet().stream().findFirst().orElse("main.js");
+        final String documentSnapshot = room.getFileContent(filename);
         final String language         = room.getLanguage();
 
         // Launch the Gemini API call on a dedicated background thread.
@@ -639,5 +654,138 @@ public class CodeReviewServer extends WebSocketServer {
 
         System.out.println("[handleLanguageChange] Room '" + room.getRoomCode()
                 + "' language -> '" + language + "' (set by '" + userId + "').");
+    }
+
+    // ── File system handlers ──────────────────────────────────────────────────
+
+    /**
+     * FILE_CREATE  { "type": "FILE_CREATE", "userId": "minh", "filename": "utils.js" }
+     *
+     * Creates the file in the room's virtual FS and broadcasts to all clients so
+     * everyone's file explorer updates in real time.
+     */
+    private void handleFileCreate(WebSocket conn, JsonObject msg) {
+        if (!msg.has("filename")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String filename = msg.get("filename").getAsString().trim();
+        String userId   = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        if (filename.isEmpty()) return;
+
+        boolean created = room.createFile(filename);
+        if (!created) {
+            System.out.println("[handleFileCreate] File '" + filename + "' already exists.");
+            return;
+        }
+
+        JsonObject broadcast = new JsonObject();
+        broadcast.addProperty("type",     "FILE_CREATE");
+        broadcast.addProperty("userId",   userId);
+        broadcast.addProperty("filename", filename);
+        room.broadcast(gson.toJson(broadcast));
+
+        System.out.println("[handleFileCreate] '" + userId + "' created '" + filename
+                + "' in room '" + room.getRoomCode() + "'.");
+    }
+
+    /**
+     * FILE_DELETE  { "type": "FILE_DELETE", "userId": "minh", "filename": "utils.js" }
+     */
+    private void handleFileDelete(WebSocket conn, JsonObject msg) {
+        if (!msg.has("filename")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String filename = msg.get("filename").getAsString().trim();
+        String userId   = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        boolean deleted = room.deleteFile(filename);
+        if (!deleted) {
+            System.out.println("[handleFileDelete] Cannot delete '" + filename + "' (not found or last file).");
+            return;
+        }
+
+        JsonObject broadcast = new JsonObject();
+        broadcast.addProperty("type",     "FILE_DELETE");
+        broadcast.addProperty("userId",   userId);
+        broadcast.addProperty("filename", filename);
+        room.broadcast(gson.toJson(broadcast));
+
+        System.out.println("[handleFileDelete] '" + userId + "' deleted '" + filename
+                + "' in room '" + room.getRoomCode() + "'.");
+    }
+
+    /**
+     * FILE_RENAME  { "type": "FILE_RENAME", "userId": "minh", "oldName": "foo.js", "newName": "bar.js" }
+     */
+    private void handleFileRename(WebSocket conn, JsonObject msg) {
+        if (!msg.has("oldName") || !msg.has("newName")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String oldName = msg.get("oldName").getAsString().trim();
+        String newName = msg.get("newName").getAsString().trim();
+        String userId  = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        if (newName.isEmpty()) return;
+
+        boolean renamed = room.renameFile(oldName, newName);
+        if (!renamed) {
+            System.out.println("[handleFileRename] Cannot rename '" + oldName + "' -> '" + newName + "'.");
+            return;
+        }
+
+        JsonObject broadcast = new JsonObject();
+        broadcast.addProperty("type",    "FILE_RENAME");
+        broadcast.addProperty("userId",  userId);
+        broadcast.addProperty("oldName", oldName);
+        broadcast.addProperty("newName", newName);
+        room.broadcast(gson.toJson(broadcast));
+
+        System.out.println("[handleFileRename] '" + userId + "' renamed '" + oldName
+                + "' -> '" + newName + "' in room '" + room.getRoomCode() + "'.");
+    }
+
+    // ── Terminal handlers ─────────────────────────────────────────────────────
+
+    /**
+     * TERMINAL_OPEN  { "type": "TERMINAL_OPEN" }
+     *
+     * Starts the room's shared /bin/bash process if it isn't already running.
+     * All terminal output is broadcast to every client in the room.
+     */
+    private void handleTerminalOpen(WebSocket conn) {
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        room.startTerminal(chunk -> {
+            if (room.isEmpty()) return;
+            JsonObject out = new JsonObject();
+            out.addProperty("type", "TERMINAL_OUTPUT");
+            out.addProperty("data", chunk);
+            room.broadcast(gson.toJson(out));
+        });
+
+        System.out.println("[handleTerminalOpen] Terminal started/already running for room '"
+                + room.getRoomCode() + "'.");
+    }
+
+    /**
+     * TERMINAL_INPUT  { "type": "TERMINAL_INPUT", "data": "ls\n" }
+     *
+     * Writes raw bytes to the room's terminal stdin (user keystrokes).
+     */
+    private void handleTerminalInput(WebSocket conn, JsonObject msg) {
+        if (!msg.has("data")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        room.writeToTerminal(msg.get("data").getAsString());
     }
 }
