@@ -236,11 +236,24 @@ public class Room {
         if (terminalProcess != null && terminalProcess.isAlive()) return;
 
         try {
-            ProcessBuilder pb = new ProcessBuilder("/bin/bash", "--login");
-            pb.redirectErrorStream(true);                    // merge stderr into stdout
+            // Run bash in interactive mode (-i).
+            //
+            // Why not `script -q /dev/null /bin/bash`?
+            //   `script` calls tcgetattr() on its own stdin.  When stdin is a
+            //   Java ProcessBuilder pipe (not a real TTY), tcgetattr() returns
+            //   ENOTTY and `script` exits immediately — so bash never starts and
+            //   every write to terminalStdin is silently dropped.
+            //
+            // With `-i`, bash is forced into interactive mode regardless of whether
+            // stdin is a terminal.  It writes the PS1 prompt to stderr (which we
+            // capture via redirectErrorStream) and reads commands line-by-line from
+            // stdin.  Echo and readline are not available without a PTY, so the
+            // client implements local echo instead (see Terminal.jsx).
+            ProcessBuilder pb = new ProcessBuilder("/bin/bash", "-i");
+            pb.redirectErrorStream(true);   // merge PS1 prompts (stderr) into stdout
             pb.environment().put("TERM", "xterm-256color");
-            pb.environment().put("COLUMNS", "220");
-            pb.environment().put("LINES", "30");
+            pb.environment().put("COLUMNS", "200");
+            pb.environment().put("LINES",   "50");
 
             terminalProcess = pb.start();
             terminalStdin   = terminalProcess.getOutputStream();

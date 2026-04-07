@@ -685,7 +685,10 @@ public class CodeReviewServer extends WebSocketServer {
         broadcast.addProperty("type",     "FILE_CREATE");
         broadcast.addProperty("userId",   userId);
         broadcast.addProperty("filename", filename);
-        room.broadcast(gson.toJson(broadcast));
+        // broadcastExcept: the creator already applied the change optimistically.
+        // Echoing back would reset files[filename] = '' and overwrite any content
+        // the user typed before the echo arrived.
+        room.broadcastExcept(conn, gson.toJson(broadcast));
 
         System.out.println("[handleFileCreate] '" + userId + "' created '" + filename
                 + "' in room '" + room.getRoomCode() + "'.");
@@ -713,7 +716,7 @@ public class CodeReviewServer extends WebSocketServer {
         broadcast.addProperty("type",     "FILE_DELETE");
         broadcast.addProperty("userId",   userId);
         broadcast.addProperty("filename", filename);
-        room.broadcast(gson.toJson(broadcast));
+        room.broadcastExcept(conn, gson.toJson(broadcast)); // sender already applied optimistically
 
         System.out.println("[handleFileDelete] '" + userId + "' deleted '" + filename
                 + "' in room '" + room.getRoomCode() + "'.");
@@ -745,7 +748,7 @@ public class CodeReviewServer extends WebSocketServer {
         broadcast.addProperty("userId",  userId);
         broadcast.addProperty("oldName", oldName);
         broadcast.addProperty("newName", newName);
-        room.broadcast(gson.toJson(broadcast));
+        room.broadcastExcept(conn, gson.toJson(broadcast)); // sender already applied optimistically
 
         System.out.println("[handleFileRename] '" + userId + "' renamed '" + oldName
                 + "' -> '" + newName + "' in room '" + room.getRoomCode() + "'.");

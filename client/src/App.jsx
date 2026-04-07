@@ -139,6 +139,7 @@ export default function App() {
   // ── Imperative Terminal handles ───────────────────────────────────────────
   const writeTerminalRef = useRef(null)
   const fitTerminalRef   = useRef(null)
+  const focusTerminalRef = useRef(null)
 
   // ── Pending refs (messages that arrived before editor mounted) ────────────
   const pendingEditRef     = useRef(null)
@@ -442,9 +443,10 @@ export default function App() {
 
   // ── Terminal ready callback ───────────────────────────────────────────────
 
-  const onTerminalReady = useCallback(({ write, fit }) => {
-    writeTerminalRef.current = write
-    fitTerminalRef.current   = fit
+  const onTerminalReady = useCallback(({ write, fit, focus }) => {
+    writeTerminalRef.current  = write
+    fitTerminalRef.current    = fit
+    focusTerminalRef.current  = focus
 
     // Tell the server to start the shell process.
     const ws = wsRef.current
@@ -750,7 +752,10 @@ export default function App() {
             {/* Tab bar */}
             <div className="flex items-center border-b border-gray-800 flex-shrink-0" style={{ height: 32 }}>
               <button
-                onClick={() => { setBottomTab('terminal'); setTimeout(() => fitTerminalRef.current?.(), 50) }}
+                onClick={() => {
+                  setBottomTab('terminal')
+                  setTimeout(() => { fitTerminalRef.current?.(); focusTerminalRef.current?.() }, 50)
+                }}
                 className={`px-4 h-full text-xs uppercase tracking-widest transition-colors border-r border-gray-800
                   ${bottomTab === 'terminal'
                     ? 'text-emerald-400 border-t-2 border-t-emerald-500 bg-gray-900'

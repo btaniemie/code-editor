@@ -49,8 +49,31 @@ export default function Terminal({ wsRef, onReady }) {
     // Small delay so the DOM is fully laid out before fitting.
     requestAnimationFrame(() => { fitAddon.fit(); term.focus() })
 
-    // Send user keystrokes to the server as TERMINAL_INPUT messages.
+    // Handle user input: local echo + forward to server.
+    //
+    // Without a PTY, bash's line discipline doesn't echo characters back.
+    // We echo them ourselves so the user can see what they're typing.
     term.onData(data => {
+      const code = data.charCodeAt(0)
+
+      // Local echo — mirrors what a PTY line discipline would do:
+      if (data === '\r') {
+        // Enter: move to start of new line (bash gets \r, treats it as newline)
+        term.write('\r\n')
+      } else if (data === '\x7f') {
+        // Backspace (DEL): erase the last character on screen
+        term.write('\b \b')
+      } else if (data.startsWith('\x1b')) {
+        // Escape sequences (arrow keys, F-keys, etc.) — don't echo,
+        // just forward so bash can process them
+      } else if (code >= 32 && code < 127) {
+        // Printable ASCII
+        term.write(data)
+      }
+      // Control chars other than \r/\x7f (Ctrl+C = \x03, Ctrl+D = \x04, etc.)
+      // are forwarded to bash but not echoed — bash will handle them.
+
+      // Forward every keystroke to the server → bash stdin
       const ws = wsRef.current
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'TERMINAL_INPUT', data }))
