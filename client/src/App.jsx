@@ -284,6 +284,7 @@ export default function App() {
           timestamp: msg.timestamp,
           replyTo:   msg.replyTo ?? null,
           system:    msg.userId === 'system',
+          private:   msg.private ?? false,
         }
         setChat(prev => [...prev, chatMsg])
         break
@@ -292,6 +293,7 @@ export default function App() {
       case 'AI_CHAT': {
         setChat(prev => [...prev, {
           userId: 'ai', text: msg.text, timestamp: msg.timestamp, replyTo: null,
+          private: msg.private ?? false,
         }])
         break
       }

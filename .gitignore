@@ -1,4 +1,6 @@
 server/target/
+server/*.tar.gz
+server/*.pkg
 
 client/node_modules/
 client/dist/
