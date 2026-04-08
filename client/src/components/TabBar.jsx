@@ -17,12 +17,14 @@ export default function TabBar({ tabs, activeFile, onTabSelect, onTabClose }) {
       style={{ height: 35, scrollbarWidth: 'none' }}
     >
       {tabs.map(name => {
-        const icon    = fileIcon(name)
-        const isActive = name === activeFile
+        const shortName = name.includes('/') ? name.split('/').pop() : name
+        const icon      = fileIcon(shortName)
+        const isActive  = name === activeFile
         return (
           <div
             key={name}
             onClick={() => onTabSelect(name)}
+            title={name}
             style={{ maxWidth: 180 }}
             className={`group flex items-center gap-1.5 px-3 cursor-pointer border-r border-gray-800
               flex-shrink-0 select-none transition-colors
@@ -39,8 +41,8 @@ export default function TabBar({ tabs, activeFile, onTabSelect, onTabClose }) {
               {icon.label}
             </span>
 
-            {/* Filename */}
-            <span className="truncate text-xs font-mono">{name}</span>
+            {/* Filename (short) with full path as tooltip */}
+            <span className="truncate text-xs font-mono">{shortName}</span>
 
             {/* Close button */}
             {tabs.length > 1 && (
