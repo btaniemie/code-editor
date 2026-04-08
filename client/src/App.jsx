@@ -197,9 +197,9 @@ export default function App() {
   const switchToFile = useCallback((filename) => {
     setOpenTabs(prev => prev.includes(filename) ? prev : [...prev, filename])
     setActiveFile(filename)
-    // Load the file's content into the editor.  We read from the files state
-    // via a ref so this callback doesn't close over stale state.
-    // The actual apply happens in the effect below.
+    // Update the ref immediately so onLocalChange sends EDIT to the correct
+    // file even if the user types before the useEffect below has a chance to run.
+    activeFileRef.current = filename
   }, [])
 
   // Apply editor content whenever activeFile changes.
@@ -236,7 +236,7 @@ export default function App() {
         const hasFiles    = Object.keys(serverFiles).length > 0
 
         if (hasFiles) {
-          setFiles(serverFiles)
+          setFiles(prev => ({ ...prev, ...serverFiles }))
           const firstFile = Object.keys(serverFiles)[0]
 
           // Populate editor with the active (first) file.
@@ -513,6 +513,7 @@ export default function App() {
     setFiles(prev => ({ ...prev, [filename]: '' }))
     setOpenTabs(prev => [...prev, filename])
     setActiveFile(filename)
+    activeFileRef.current = filename
   }, [session?.userId])
 
   const handleFileDelete = useCallback((filename) => {
