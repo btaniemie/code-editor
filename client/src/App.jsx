@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import JoinScreen    from './components/JoinScreen'
 import UserList      from './components/UserList'
 import Editor        from './components/Editor'
@@ -113,7 +113,7 @@ export default function App() {
   // Keep a ref so onLocalChange (which closes over session) always sees the
   // current activeFile without needing to be re-created on every file switch.
   const activeFileRef = useRef('main.js')
-  useEffect(() => { activeFileRef.current = activeFile }, [activeFile])
+  useLayoutEffect(() => { activeFileRef.current = activeFile }, [activeFile])
 
   // ── Panel open/close ─────────────────────────────────────────────────────
   const [leftOpen,   setLeftOpen]   = useState(true)
@@ -150,6 +150,9 @@ export default function App() {
   // Guard: do not send EDIT before the initial SYNC is applied.
   const syncReceivedRef = useRef(false)
 
+  // Always-current ref to handleMessage so ws.onmessage never uses a stale closure.
+  const handleMessageRef = useRef(null)
+
   // ── WebSocket connection ──────────────────────────────────────────────────
 
   const connectWS = useCallback((userId, roomCode) => {
@@ -161,7 +164,7 @@ export default function App() {
       setStatus('Connected')
     }
     ws.onmessage = (event) => {
-      handleMessage(JSON.parse(event.data), userId, roomCode)
+      handleMessageRef.current?.(JSON.parse(event.data), userId, roomCode)
     }
     ws.onclose = () => setStatus('Disconnected')
     ws.onerror = () => setStatus('Connection error')
@@ -214,6 +217,8 @@ export default function App() {
   }, [activeFile])
 
   // ── Client-side message router ─────────────────────────────────────────────
+  // Keep handleMessageRef always pointing to the latest handleMessage so that
+  // ws.onmessage (captured once on connect) never calls a stale closure.
 
   function handleMessage(msg, userId, roomCode) {
     switch (msg.type) {
@@ -604,6 +609,9 @@ export default function App() {
     setActiveFile('main.js')
     activeFileRef.current = 'main.js'
   }, [])
+
+  // Update ref on every render so ws.onmessage always calls the latest handleMessage.
+  handleMessageRef.current = handleMessage
 
   // ── Render ────────────────────────────────────────────────────────────────
 
