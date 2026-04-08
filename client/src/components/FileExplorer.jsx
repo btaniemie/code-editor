@@ -50,6 +50,22 @@ function buildTree(filePaths) {
   return root
 }
 
+// Injects a virtual (empty) folder into the tree so a pending folder shows up
+// before any files exist inside it. Safe to call when the folder already exists.
+function injectPendingFolder(root, folderPath) {
+  const parts = folderPath.split('/')
+  let children = root
+  for (let i = 0; i < parts.length; i++) {
+    const path = parts.slice(0, i + 1).join('/')
+    let node = children.find(n => n.type === 'folder' && n.path === path)
+    if (!node) {
+      node = { type: 'folder', name: parts[i], path, children: [] }
+      children.push(node)
+    }
+    children = node.children
+  }
+}
+
 // ── FileExplorer ───────────────────────────────────────────────────────────
 
 export default function FileExplorer({ files, activeFile, onFileSelect, onFileCreate, onFileDelete, onFileRename }) {
@@ -63,9 +79,13 @@ export default function FileExplorer({ files, activeFile, onFileSelect, onFileCr
   // renaming: null = none | 'src/main.js' = that file
   const [renaming,       setRenaming]       = useState(null)
   const [renameValue,    setRenameValue]    = useState('')
+  // pendingFolder: folder named by user but not yet containing any file
+  const [pendingFolder,  setPendingFolder]  = useState(null)
 
   const filePaths = Object.keys(files)
   const tree      = buildTree(filePaths)
+  // Inject the pending folder so it appears in the tree before a file is added.
+  if (pendingFolder) injectPendingFolder(tree, pendingFolder)
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -84,6 +104,7 @@ export default function FileExplorer({ files, activeFile, onFileSelect, onFileCr
     }
     setCreatingIn(null)
     setNewFileName('')
+    setPendingFolder(null)  // folder now real (or cancelled)
   }
 
   const submitFolder = (e, parentPath) => {
@@ -91,8 +112,9 @@ export default function FileExplorer({ files, activeFile, onFileSelect, onFileCr
     const name = newFolderName.trim()
     if (name) {
       const full = parentPath ? `${parentPath}/${name}` : name
-      // Expand the new folder and immediately prompt for a file inside it.
-      // (Folders only exist once they contain at least one file.)
+      // Mark this as the pending folder so injectPendingFolder adds it to the
+      // tree immediately, then open the file input inside it.
+      setPendingFolder(full)
       setExpanded(prev => new Set([...prev, full]))
       openFileIn(full)
     }
@@ -195,8 +217,8 @@ export default function FileExplorer({ files, activeFile, onFileSelect, onFileCr
                       autoFocus
                       value={newFileName}
                       onChange={e => setNewFileName(e.target.value)}
-                      onBlur={() => { if (!newFileName.trim()) setCreatingIn(null) }}
-                      onKeyDown={e => { if (e.key === 'Escape') setCreatingIn(null) }}
+                      onBlur={() => { if (!newFileName.trim()) { setCreatingIn(null); setPendingFolder(null) } }}
+                      onKeyDown={e => { if (e.key === 'Escape') { setCreatingIn(null); setPendingFolder(null) } }}
                       placeholder="filename.js"
                       className="w-full bg-gray-800 text-gray-200 text-xs rounded px-2 py-1
                                  border border-emerald-600 outline-none font-mono"
@@ -354,8 +376,8 @@ export default function FileExplorer({ files, activeFile, onFileSelect, onFileCr
               autoFocus
               value={newFileName}
               onChange={e => setNewFileName(e.target.value)}
-              onBlur={() => { if (!newFileName.trim()) setCreatingIn(null) }}
-              onKeyDown={e => { if (e.key === 'Escape') setCreatingIn(null) }}
+              onBlur={() => { if (!newFileName.trim()) { setCreatingIn(null); setPendingFolder(null) } }}
+              onKeyDown={e => { if (e.key === 'Escape') { setCreatingIn(null); setPendingFolder(null) } }}
               placeholder="filename.js"
               className="w-full bg-gray-800 text-gray-200 text-xs rounded px-2 py-1
                          border border-emerald-600 outline-none font-mono"
