@@ -324,7 +324,9 @@ export default function App() {
       // ── File system events ─────────────────────────────────────────────────
       case 'FILE_CREATE': {
         const { filename } = msg
-        setFiles(prev => ({ ...prev, [filename]: '' }))
+        // Idempotent: if the file already exists locally (creator's optimistic update),
+        // keep it as-is so typed content isn't overwritten by the server echo.
+        setFiles(prev => (filename in prev ? prev : { ...prev, [filename]: '' }))
         break
       }
 

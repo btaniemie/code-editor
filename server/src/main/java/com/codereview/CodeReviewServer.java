@@ -685,10 +685,10 @@ public class CodeReviewServer extends WebSocketServer {
         broadcast.addProperty("type",     "FILE_CREATE");
         broadcast.addProperty("userId",   userId);
         broadcast.addProperty("filename", filename);
-        // broadcastExcept: the creator already applied the change optimistically.
-        // Echoing back would reset files[filename] = '' and overwrite any content
-        // the user typed before the echo arrived.
-        room.broadcastExcept(conn, gson.toJson(broadcast));
+        // Broadcast to ALL connections so the creator also gets server confirmation.
+        // The client handler is idempotent (skips if file already exists locally),
+        // so the creator's optimistic state is never overwritten.
+        room.broadcast(gson.toJson(broadcast));
 
         System.out.println("[handleFileCreate] '" + userId + "' created '" + filename
                 + "' in room '" + room.getRoomCode() + "'.");
