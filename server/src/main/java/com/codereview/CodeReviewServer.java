@@ -9,6 +9,8 @@ import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
 
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Collection;
 
 /**
@@ -35,9 +37,12 @@ public class CodeReviewServer extends WebSocketServer {
         setReuseAddr(true);
 
         // Read the Gemini API key from the environment.
-        // If missing, reviews will fail with AI_ERROR — server still starts.
+        // If missing, fall back to reading from a .env file in the working directory.
         String apiKey = System.getenv("GEMINI_API_KEY");
-        if (apiKey != null) apiKey = apiKey.trim(); // strip accidental whitespace/CRLF from .env
+        if (apiKey != null) apiKey = apiKey.trim(); // strip accidental whitespace/CRLF
+        if (apiKey == null || apiKey.isBlank()) {
+            apiKey = loadApiKeyFromDotEnv();
+        }
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("[Server] WARNING: GEMINI_API_KEY not set. Reviews will return AI_ERROR.");
             apiKey = "";
@@ -487,28 +492,46 @@ public class CodeReviewServer extends WebSocketServer {
 
         if (text.isEmpty()) return;
 
-        // Persist to room history before broadcasting so that any concurrent
-        // SYNC (triggered by a join on another thread) sees this message too.
-        room.addChatMessage(userId, text, replyTo);
+        // @ai/private — message and AI response are visible only to the sender.
+        // We do not persist to room history and do not broadcast to other clients.
+        boolean isPrivate = text.toLowerCase().contains("@ai/private");
 
         long timestamp = System.currentTimeMillis();
 
-        // Build the outbound CHAT frame and broadcast to all TCP connections.
-        JsonObject broadcast = new JsonObject();
-        broadcast.addProperty("type",      "CHAT");
-        broadcast.addProperty("userId",    userId);
-        broadcast.addProperty("text",      text);
-        broadcast.addProperty("timestamp", timestamp);
-        if (replyTo >= 0) {
-            broadcast.addProperty("replyTo", replyTo);
+        if (isPrivate) {
+            // Echo the message back only to the sender so it appears in their chat.
+            JsonObject selfMsg = new JsonObject();
+            selfMsg.addProperty("type",      "CHAT");
+            selfMsg.addProperty("userId",    userId);
+            selfMsg.addProperty("text",      text);
+            selfMsg.addProperty("timestamp", timestamp);
+            selfMsg.add("replyTo", null);
+            selfMsg.addProperty("private",   true);
+            conn.send(gson.toJson(selfMsg));
+
+            System.out.println("[handleChat] '" + userId + "' in room '" + room.getRoomCode()
+                    + "' (private @ai): " + text);
         } else {
-            broadcast.add("replyTo", null);
+            // Persist to room history before broadcasting so that any concurrent
+            // SYNC (triggered by a join on another thread) sees this message too.
+            room.addChatMessage(userId, text, replyTo);
+
+            // Build the outbound CHAT frame and broadcast to all TCP connections.
+            JsonObject broadcast = new JsonObject();
+            broadcast.addProperty("type",      "CHAT");
+            broadcast.addProperty("userId",    userId);
+            broadcast.addProperty("text",      text);
+            broadcast.addProperty("timestamp", timestamp);
+            if (replyTo >= 0) {
+                broadcast.addProperty("replyTo", replyTo);
+            } else {
+                broadcast.add("replyTo", null);
+            }
+            room.broadcast(gson.toJson(broadcast));
+
+            System.out.println("[handleChat] '" + userId + "' in room '" + room.getRoomCode()
+                    + "': " + text);
         }
-
-        room.broadcast(gson.toJson(broadcast));
-
-        System.out.println("[handleChat] '" + userId + "' in room '" + room.getRoomCode()
-                + "': " + text);
 
         // @ai trigger — if the message mentions @ai, ask Gemini for a response.
         // We snapshot all room state now so edits during the API call don't
@@ -523,24 +546,32 @@ public class CodeReviewServer extends WebSocketServer {
             Thread aiThread = new Thread(() -> {
                 try {
                     System.out.println("[aiChatThread] @ai triggered by '" + userId
-                            + "' in room '" + room.getRoomCode() + "'.");
+                            + "' in room '" + room.getRoomCode() + "'"
+                            + (isPrivate ? " (private)" : "") + ".");
 
                     String aiResponse = gemini.chat(
                         docSnapshot, langSnapshot, commentSnapshot, chatSnapshot, question
                     );
 
-                    // Persist the AI's reply so late joiners see it in SYNC.
-                    room.addChatMessage("ai", aiResponse, -1);
-
-                    // Broadcast AI_CHAT to every client over their TCP connections.
                     JsonObject aiChat = new JsonObject();
                     aiChat.addProperty("type",      "AI_CHAT");
                     aiChat.addProperty("text",      aiResponse);
                     aiChat.addProperty("timestamp", System.currentTimeMillis());
-                    room.broadcast(gson.toJson(aiChat));
 
-                    System.out.println("[aiChatThread] AI response sent to room '"
-                            + room.getRoomCode() + "'.");
+                    if (isPrivate) {
+                        // Send response only to the requesting connection; do not persist.
+                        aiChat.addProperty("private", true);
+                        if (conn.isOpen()) conn.send(gson.toJson(aiChat));
+                        System.out.println("[aiChatThread] Private AI response sent to '"
+                                + userId + "'.");
+                    } else {
+                        // Persist the AI's reply so late joiners see it in SYNC.
+                        room.addChatMessage("ai", aiResponse, -1);
+                        // Broadcast AI_CHAT to every client over their TCP connections.
+                        room.broadcast(gson.toJson(aiChat));
+                        System.out.println("[aiChatThread] AI response sent to room '"
+                                + room.getRoomCode() + "'.");
+                    }
 
                 } catch (Exception e) {
                     System.err.println("[aiChatThread] Gemini chat error: " + e.getMessage());
@@ -548,7 +579,11 @@ public class CodeReviewServer extends WebSocketServer {
                     JsonObject error = new JsonObject();
                     error.addProperty("type", "AI_ERROR");
                     error.addProperty("text", "AI chat failed: " + e.getMessage());
-                    room.broadcast(gson.toJson(error));
+                    if (isPrivate) {
+                        if (conn.isOpen()) conn.send(gson.toJson(error));
+                    } else {
+                        room.broadcast(gson.toJson(error));
+                    }
                 }
             });
 
@@ -566,6 +601,30 @@ public class CodeReviewServer extends WebSocketServer {
      * The language is also included in future SYNC messages so late joiners
      * start with the correct highlighting.
      */
+    /**
+     * Reads GEMINI_API_KEY from a .env file in the current working directory.
+     * Returns null if the file doesn't exist or the key isn't found.
+     */
+    private static String loadApiKeyFromDotEnv() {
+        try {
+            java.nio.file.Path envFile = Paths.get(".env");
+            if (!Files.exists(envFile)) return null;
+            for (String line : Files.readAllLines(envFile)) {
+                line = line.trim();
+                if (line.startsWith("GEMINI_API_KEY=")) {
+                    String value = line.substring("GEMINI_API_KEY=".length()).trim();
+                    if (!value.isBlank()) {
+                        System.out.println("[Server] Loaded GEMINI_API_KEY from .env file");
+                        return value;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[Server] Could not read .env file: " + e.getMessage());
+        }
+        return null;
+    }
+
     private void handleLanguageChange(WebSocket conn, JsonObject msg) {
         if (!msg.has("language")) return;
 
