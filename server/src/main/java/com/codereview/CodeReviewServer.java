@@ -374,9 +374,13 @@ public class CodeReviewServer extends WebSocketServer {
                     String text     = c.has("text")     ? c.get("text").getAsString()     : "";
                     String severity = c.has("severity") ? c.get("severity").getAsString() : "info";
                     String category = c.has("category") ? c.get("category").getAsString() : "style";
+                    // fix is optional — null when the issue cannot be corrected by
+                    // replacing a single line (Gemini returns null or omits the field).
+                    String fix = (c.has("fix") && !c.get("fix").isJsonNull())
+                                 ? c.get("fix").getAsString() : null;
 
                     // Persist so late-joining users receive it in SYNC
-                    room.addComment(line, text, severity, category);
+                    room.addComment(line, text, severity, category, fix);
 
                     // Broadcast to every client in the room over their TCP connections
                     JsonObject aiComment = new JsonObject();
@@ -385,6 +389,7 @@ public class CodeReviewServer extends WebSocketServer {
                     aiComment.addProperty("text",     text);
                     aiComment.addProperty("severity", severity);
                     aiComment.addProperty("category", category);
+                    if (fix != null) aiComment.addProperty("fix", fix);
                     room.broadcast(gson.toJson(aiComment));
                 }
 
