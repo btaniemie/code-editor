@@ -236,8 +236,8 @@ class CommentGutterMarker extends GutterMarker {
       popup.appendChild(header)
       popup.appendChild(text)
 
-      // ── Apply Fix section (only when AI provided a single-line fix) ─────
-      if (c.fix != null && c.fix.trim() !== '') {
+      // ── Apply Fix section (only when AI provided a fix range) ────────────
+      if (c.fix != null && c.fix.text != null) {
         const fixSection = document.createElement('div')
         fixSection.style.cssText = 'margin-top:8px;'
 
@@ -248,7 +248,7 @@ class CommentGutterMarker extends GutterMarker {
           'letter-spacing:0.05em;margin-bottom:3px;'
 
         const fixCode = document.createElement('pre')
-        fixCode.textContent = c.fix
+        fixCode.textContent = c.fix.text
         fixCode.style.cssText =
           'font-family:ui-monospace,monospace;font-size:11px;color:#7dd3fc;' +
           'background:#0f172a;padding:5px 8px;border-radius:4px;' +
@@ -266,10 +266,10 @@ class CommentGutterMarker extends GutterMarker {
         fixBtn.addEventListener('mouseleave', () => { fixBtn.style.background = '#166534' })
 
         const capturedLine = this.lineNum
-        const capturedFix  = c.fix
+        const capturedFix  = c.fix   // { startLine, endLine, text }
         fixBtn.addEventListener('click', (e) => {
           e.stopPropagation()
-          _applyFixFn?.(capturedLine, capturedFix)
+          _applyFixFn?.(capturedFix)
           _removeCommentFn?.(capturedLine)
           popup.style.display = 'none'
           open = false                  // eslint-disable-line no-use-before-define
@@ -392,17 +392,18 @@ export default function Editor({ onLocalChange, onCursorMove, onReady, initialLa
       view.dispatch({ effects: removeCommentEffect.of(lineNum) })
     }
 
-    _applyFixFn = (lineNum, fixText) => {
+    // fix is { startLine, endLine, text } — replaces the given inclusive line range.
+    // Dispatched WITHOUT RemoteAnnotation so it counts as a local change and
+    // triggers onLocalChange → EDIT broadcast to all other clients.
+    _applyFixFn = (fix) => {
+      if (!fix) return
       try {
-        const line = view.state.doc.line(
-          Math.max(1, Math.min(lineNum, view.state.doc.lines))
-        )
-        // Dispatch WITHOUT RemoteAnnotation so the updateListener treats this
-        // as a local change and calls onLocalChange → sends EDIT to the server
-        // → server broadcasts to all other clients.
-        view.dispatch({ changes: { from: line.from, to: line.to, insert: fixText } })
+        const maxLine = view.state.doc.lines
+        const start   = view.state.doc.line(Math.max(1, Math.min(fix.startLine, maxLine)))
+        const end     = view.state.doc.line(Math.max(1, Math.min(fix.endLine,   maxLine)))
+        view.dispatch({ changes: { from: start.from, to: end.to, insert: fix.text } })
       } catch (e) {
-        console.error('[applyFix] Failed to apply fix at line', lineNum, e)
+        console.error('[applyFix] Failed to apply fix', fix, e)
       }
     }
 
