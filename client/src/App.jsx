@@ -219,7 +219,7 @@ export default function App() {
           if (clearCommentsRef.current && addCommentRef.current) {
             clearCommentsRef.current()
             for (const c of msg.comments)
-              addCommentRef.current(c.line, c.text, c.severity, c.category)
+              addCommentRef.current(c.line, c.text, c.severity, c.category, c.fix ?? null)
           } else {
             pendingCommentsRef.current = msg.comments
           }
@@ -262,9 +262,9 @@ export default function App() {
         break
 
       case 'AI_COMMENT': {
-        const c = { line: msg.line, text: msg.text, severity: msg.severity, category: msg.category }
+        const c = { line: msg.line, text: msg.text, severity: msg.severity, category: msg.category, fix: msg.fix ?? null }
         setComments(prev => [...prev, c])
-        addCommentRef.current?.(msg.line, msg.text, msg.severity, msg.category)
+        addCommentRef.current?.(msg.line, msg.text, msg.severity, msg.category, msg.fix ?? null)
         break
       }
 
@@ -344,7 +344,7 @@ export default function App() {
     if (pendingCommentsRef.current !== null) {
       clearComments()
       for (const c of pendingCommentsRef.current)
-        addComment(c.line, c.text, c.severity, c.category)
+        addComment(c.line, c.text, c.severity, c.category, c.fix ?? null)
       // Intentionally NOT clearing — see note above.
     }
     if (pendingLanguageRef.current !== null) {

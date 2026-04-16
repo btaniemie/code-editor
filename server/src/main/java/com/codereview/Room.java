@@ -136,13 +136,17 @@ public class Room {
     /**
      * Appends one AI comment to the room's persistent comment list.
      * Called from the background review thread after each Gemini response item.
+     *
+     * @param fix  the corrected single-line replacement suggested by the AI,
+     *             or null if the issue cannot be expressed as a one-line fix
      */
-    public synchronized void addComment(int line, String text, String severity, String category) {
+    public synchronized void addComment(int line, String text, String severity, String category, String fix) {
         JsonObject comment = new JsonObject();
         comment.addProperty("line",     line);
         comment.addProperty("text",     text);
         comment.addProperty("severity", severity);
         comment.addProperty("category", category);
+        if (fix != null && !fix.isBlank()) comment.addProperty("fix", fix);
         comments.add(comment);
     }
 

@@ -43,6 +43,15 @@ function severityColor(severity) {
   return '#3b82f6' // info
 }
 
+// ── Apply-fix bridge ──────────────────────────────────────────────────────
+// The gutter marker's DOM is created at module scope (outside any component),
+// so it cannot close over the EditorView instance directly.  We keep a
+// module-level reference to the active view's apply-fix function and update
+// it whenever the editor mounts or unmounts.  This is safe because only one
+// Editor instance is active at a time in this application.
+let _applyFixFn      = null
+let _removeCommentFn = null
+
 // ── Remote cursor infrastructure ──────────────────────────────────────────
 
 class RemoteCursorWidget extends WidgetType {
@@ -121,7 +130,9 @@ const RemoteAnnotation = Annotation.define()
 
 const addCommentEffect    = StateEffect.define()
 const clearCommentsEffect = StateEffect.define()
+const removeCommentEffect = StateEffect.define()  // value: lineNum (number)
 
+// commentField stores Map<lineNum, Array<{text, severity, category, fix}>>
 const commentField = StateField.define({
   create: () => new Map(),
 
@@ -130,11 +141,14 @@ const commentField = StateField.define({
     for (const e of tr.effects) {
       if (e.is(addCommentEffect)) {
         if (next === map) next = new Map(map)
-        const { line, text, severity, category } = e.value
+        const { line, text, severity, category, fix } = e.value
         const existing = next.get(line) ?? []
-        next.set(line, [...existing, { text, severity, category }])
+        next.set(line, [...existing, { text, severity, category, fix: fix ?? null }])
       } else if (e.is(clearCommentsEffect)) {
         next = new Map()
+      } else if (e.is(removeCommentEffect)) {
+        if (next === map) next = new Map(map)
+        next.delete(e.value)
       }
     }
     return next
@@ -142,13 +156,17 @@ const commentField = StateField.define({
 })
 
 class CommentGutterMarker extends GutterMarker {
-  constructor(comments) {
+  // lineNum is the 1-based document line number, needed so the Apply Fix
+  // button knows which line to replace when it calls _applyFixFn.
+  constructor(comments, lineNum) {
     super()
     this.comments = comments
+    this.lineNum  = lineNum
   }
 
   eq(other) {
     return (
+      this.lineNum === other.lineNum &&
       this.comments.length === other.comments.length &&
       this.comments.every((c, i) =>
         c.text === other.comments[i].text && c.severity === other.comments[i].severity
@@ -188,6 +206,7 @@ class CommentGutterMarker extends GutterMarker {
         popup.appendChild(sep)
       }
 
+      // ── severity + category badges ──────────────────────────────────────
       const header = document.createElement('div')
       header.style.cssText = 'display:flex;gap:5px;margin-bottom:5px;'
 
@@ -209,12 +228,82 @@ class CommentGutterMarker extends GutterMarker {
       header.appendChild(sev)
       header.appendChild(cat)
 
+      // ── comment text ────────────────────────────────────────────────────
       const text = document.createElement('div')
       text.textContent = c.text
       text.style.color = '#cbd5e1'
 
       popup.appendChild(header)
       popup.appendChild(text)
+
+      // ── Apply Fix section (only when AI provided a single-line fix) ─────
+      if (c.fix != null && c.fix.trim() !== '') {
+        const fixSection = document.createElement('div')
+        fixSection.style.cssText = 'margin-top:8px;'
+
+        const fixLabel = document.createElement('div')
+        fixLabel.textContent = 'Suggested fix:'
+        fixLabel.style.cssText =
+          'font-size:10px;color:#64748b;text-transform:uppercase;' +
+          'letter-spacing:0.05em;margin-bottom:3px;'
+
+        const fixCode = document.createElement('pre')
+        fixCode.textContent = c.fix
+        fixCode.style.cssText =
+          'font-family:ui-monospace,monospace;font-size:11px;color:#7dd3fc;' +
+          'background:#0f172a;padding:5px 8px;border-radius:4px;' +
+          'margin:0 0 6px;overflow-x:auto;white-space:pre;' +
+          'border:1px solid #1e3a5f;'
+
+        const fixBtn = document.createElement('button')
+        fixBtn.textContent = 'Apply Fix'
+        fixBtn.style.cssText =
+          'display:block;width:100%;background:#166534;color:#86efac;' +
+          'border:1px solid #166534;border-radius:4px;padding:4px 8px;' +
+          'font-size:11px;cursor:pointer;font-family:inherit;text-align:center;'
+
+        fixBtn.addEventListener('mouseenter', () => { fixBtn.style.background = '#15803d' })
+        fixBtn.addEventListener('mouseleave', () => { fixBtn.style.background = '#166534' })
+
+        const capturedLine = this.lineNum
+        const capturedFix  = c.fix
+        fixBtn.addEventListener('click', (e) => {
+          e.stopPropagation()
+          _applyFixFn?.(capturedLine, capturedFix)
+          _removeCommentFn?.(capturedLine)
+          popup.style.display = 'none'
+          open = false                  // eslint-disable-line no-use-before-define
+        })
+
+        fixSection.appendChild(fixLabel)
+        fixSection.appendChild(fixCode)
+        fixSection.appendChild(fixBtn)
+        popup.appendChild(fixSection)
+      }
+
+      // ── Ignore button (always present) ─────────────────────────────────
+      // Only add it once, after all comments are rendered (on the last iteration)
+      if (i === this.comments.length - 1) {
+        const ignoreBtn = document.createElement('button')
+        ignoreBtn.textContent = 'Ignore'
+        ignoreBtn.style.cssText =
+          'display:block;width:100%;margin-top:8px;background:transparent;' +
+          'color:#475569;border:1px solid #334155;border-radius:4px;' +
+          'padding:4px 8px;font-size:11px;cursor:pointer;font-family:inherit;text-align:center;'
+
+        ignoreBtn.addEventListener('mouseenter', () => { ignoreBtn.style.color = '#94a3b8'; ignoreBtn.style.borderColor = '#475569' })
+        ignoreBtn.addEventListener('mouseleave', () => { ignoreBtn.style.color = '#475569'; ignoreBtn.style.borderColor = '#334155' })
+
+        const capturedLine = this.lineNum
+        ignoreBtn.addEventListener('click', (e) => {
+          e.stopPropagation()
+          _removeCommentFn?.(capturedLine)
+          popup.style.display = 'none'
+          open = false                  // eslint-disable-line no-use-before-define
+        })
+
+        popup.appendChild(ignoreBtn)
+      }
     })
 
     let open = false
@@ -245,7 +334,8 @@ const commentGutter = gutter({
     for (const lineNum of sortedLines) {
       try {
         const docLine = view.state.doc.line(Math.min(lineNum, view.state.doc.lines))
-        builder.add(docLine.from, docLine.from, new CommentGutterMarker(map.get(lineNum)))
+        // Pass lineNum so the Apply Fix button knows which line to replace.
+        builder.add(docLine.from, docLine.from, new CommentGutterMarker(map.get(lineNum), lineNum))
       } catch (_) {
         // lineNum out of range after document edits — skip
       }
@@ -279,7 +369,7 @@ export default function Editor({ onLocalChange, onCursorMove, onReady, initialLa
           EditorView.theme({
             '&':                     { height: '100%', fontSize: '14px' },
             '.cm-scroller':          { overflow: 'auto', fontFamily: 'ui-monospace, monospace' },
-            '.cm-ai-comment-gutter': { width: '20px' },
+            '.cm-ai-comment-gutter': { width: '20px', overflow: 'visible' },
           }),
 
           EditorView.updateListener.of(update => {
@@ -296,6 +386,26 @@ export default function Editor({ onLocalChange, onCursorMove, onReady, initialLa
       parent: containerRef.current,
     })
 
+    // Wire up the module-level apply-fix bridge so gutter buttons can dispatch
+    // edits to this view without needing a direct closure.
+    _removeCommentFn = (lineNum) => {
+      view.dispatch({ effects: removeCommentEffect.of(lineNum) })
+    }
+
+    _applyFixFn = (lineNum, fixText) => {
+      try {
+        const line = view.state.doc.line(
+          Math.max(1, Math.min(lineNum, view.state.doc.lines))
+        )
+        // Dispatch WITHOUT RemoteAnnotation so the updateListener treats this
+        // as a local change and calls onLocalChange → sends EDIT to the server
+        // → server broadcasts to all other clients.
+        view.dispatch({ changes: { from: line.from, to: line.to, insert: fixText } })
+      } catch (e) {
+        console.error('[applyFix] Failed to apply fix at line', lineNum, e)
+      }
+    }
+
     onReady?.({
       applyEdit: (newContent) => {
         if (view.state.doc.toString() === newContent) return
@@ -311,15 +421,13 @@ export default function Editor({ onLocalChange, onCursorMove, onReady, initialLa
       removeCursor: (userId) => {
         view.dispatch({ effects: removeCursorEffect.of(userId) })
       },
-      addComment: (line, text, severity, category) => {
-        view.dispatch({ effects: addCommentEffect.of({ line, text, severity, category }) })
+      addComment: (line, text, severity, category, fix = null) => {
+        view.dispatch({ effects: addCommentEffect.of({ line, text, severity, category, fix }) })
       },
       clearComments: () => {
         view.dispatch({ effects: clearCommentsEffect.of(null) })
       },
       // Dynamically reconfigure the language extension via the Compartment.
-      // Called by App.jsx when the user changes the language selector or
-      // when a LANGUAGE_CHANGE / SYNC message arrives from the server.
       setLanguage: (lang) => {
         view.dispatch({
           effects: languageConf.reconfigure(getLanguageExtension(lang))
@@ -327,7 +435,11 @@ export default function Editor({ onLocalChange, onCursorMove, onReady, initialLa
       },
     })
 
-    return () => view.destroy()
+    return () => {
+      _applyFixFn      = null   // prevent stale view reference between StrictMode cycles
+      _removeCommentFn = null
+      view.destroy()
+    }
   }, []) // mount once — all updates go through imperative handles
 
   return <div ref={containerRef} className="h-full overflow-hidden" />

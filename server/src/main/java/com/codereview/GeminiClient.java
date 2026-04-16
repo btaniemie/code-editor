@@ -72,6 +72,7 @@ public class GeminiClient {
             HttpResponse.BodyHandlers.ofString()
         );
         System.out.println("[GeminiClient] Gemini review responded with HTTP " + response.statusCode());
+        System.out.println("[GeminiClient] RAW HTTP BODY:\n" + response.body());
 
         if (response.statusCode() != 200) {
             throw new RuntimeException(
@@ -154,7 +155,7 @@ public class GeminiClient {
 
         JsonObject generationConfig = new JsonObject();
         generationConfig.addProperty("temperature", 0.1);
-        generationConfig.addProperty("maxOutputTokens", 2048);
+        generationConfig.addProperty("maxOutputTokens", 8192);
 
         JsonObject body = new JsonObject();
         body.add("contents", contents);
@@ -198,17 +199,32 @@ public class GeminiClient {
     // -------------------------------------------------------------------------
 
     private String buildReviewPrompt(String document, String language) {
-        return "You are a code reviewer. Review the following " + language + " code.\n"
-            + "Return ONLY a JSON array. No markdown, no code fences, no explanation.\n"
-            + "Each element must have exactly these fields:\n"
-            + "  \"line\": integer — 1-based line number the comment applies to\n"
-            + "  \"text\": string  — clear, concise review comment\n"
-            + "  \"severity\": one of \"info\", \"warning\", \"critical\"\n"
-            + "  \"category\": one of \"bug\", \"style\", \"performance\", \"security\"\n\n"
-            + "If there is nothing to say, return an empty array: []\n"
-            + "Limit to the 10 most important comments.\n\n"
+        // Number each line so the model can reference exact positions in the fix.
+        String[] lines = document.split("\n", -1);
+        StringBuilder numbered = new StringBuilder();
+        for (int i = 0; i < lines.length; i++) {
+            numbered.append(String.format("%4d | %s%n", i + 1, lines[i]));
+        }
+
+        return "You are a senior " + language + " code reviewer.\n"
+            + "Return ONLY a raw JSON array — no markdown fences, no explanation.\n\n"
+            + "Each object in the array must have exactly these fields:\n"
+            + "  \"line\"     : integer — 1-based line number\n"
+            + "  \"text\"     : string  — concise review comment (1-2 sentences)\n"
+            + "  \"severity\" : \"info\" | \"warning\" | \"critical\"\n"
+            + "  \"category\" : \"bug\" | \"style\" | \"performance\" | \"security\"\n"
+            + "  \"fix\"      : string — the FULL corrected text for that single line,\n"
+            + "                 with the same leading whitespace/indentation as the original.\n"
+            + "                 Use null ONLY if the correction requires touching more than one line.\n\n"
+            + "Rules for the fix field:\n"
+            + "  - Almost every comment should have a non-null fix.\n"
+            + "  - Copy the ENTIRE original line, apply exactly the correction described, return that.\n"
+            + "  - Do NOT add a newline at the end of the fix string.\n"
+            + "  - If the fix is to delete the line entirely, use an empty string \"\".\n"
+            + "  - Only use null when the problem spans multiple consecutive lines.\n\n"
+            + "Limit output to the 10 most important comments. Return [] if there is nothing to say.\n\n"
             + "Code:\n"
-            + document;
+            + numbered;
     }
 
     /**
@@ -278,11 +294,31 @@ public class GeminiClient {
     /**
      * Parses the Gemini response envelope and extracts the content as a JsonArray.
      * Used by review().
+     *
+     * Gemini sometimes prepends prose or wraps the array in markdown fences even
+     * when instructed not to.  We locate the outermost [...] brackets to extract
+     * only the JSON array portion, making the parser robust to that noise.
      */
     private JsonArray parseJsonArrayResponse(String responseBody) {
         String text = extractTextFromResponse(responseBody);
-        text = stripMarkdownFences(text);
+        System.out.println("[GeminiClient] Raw review text from Gemini:\n" + text);
+        text = extractJsonArray(text);
+        System.out.println("[GeminiClient] Extracted JSON array:\n" + text);
         return JsonParser.parseString(text).getAsJsonArray();
+    }
+
+    /**
+     * Finds the first '[' and the matching last ']' in the string and returns
+     * that substring.  Falls back to the trimmed input if no brackets are found.
+     */
+    private String extractJsonArray(String text) {
+        int start = text.indexOf('[');
+        int end   = text.lastIndexOf(']');
+        if (start >= 0 && end > start) {
+            return text.substring(start, end + 1);
+        }
+        // No array found — return as-is and let the caller fail with a clear error
+        return text.trim();
     }
 
     /**
@@ -316,17 +352,4 @@ public class GeminiClient {
             .trim();
     }
 
-    /**
-     * Strips ```json ... ``` or ``` ... ``` wrappers if the model adds them.
-     */
-    private String stripMarkdownFences(String text) {
-        if (text.startsWith("```")) {
-            int firstNewline = text.indexOf('\n');
-            int lastFence    = text.lastIndexOf("```");
-            if (firstNewline >= 0 && lastFence > firstNewline) {
-                return text.substring(firstNewline + 1, lastFence).trim();
-            }
-        }
-        return text;
-    }
 }
