@@ -140,13 +140,20 @@ public class Room {
      * @param fix  the corrected single-line replacement suggested by the AI,
      *             or null if the issue cannot be expressed as a one-line fix
      */
-    public synchronized void addComment(int line, String text, String severity, String category, String fix) {
+    public synchronized void addComment(int line, String text, String severity, String category,
+                                         Integer fixStartLine, Integer fixEndLine, String fixText) {
         JsonObject comment = new JsonObject();
         comment.addProperty("line",     line);
         comment.addProperty("text",     text);
         comment.addProperty("severity", severity);
         comment.addProperty("category", category);
-        if (fix != null && !fix.isBlank()) comment.addProperty("fix", fix);
+        if (fixStartLine != null && fixEndLine != null && fixText != null) {
+            JsonObject fix = new JsonObject();
+            fix.addProperty("startLine", fixStartLine);
+            fix.addProperty("endLine",   fixEndLine);
+            fix.addProperty("text",      fixText);
+            comment.add("fix", fix);
+        }
         comments.add(comment);
     }
 

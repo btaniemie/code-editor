@@ -199,29 +199,31 @@ public class GeminiClient {
     // -------------------------------------------------------------------------
 
     private String buildReviewPrompt(String document, String language) {
-        // Number each line so the model can reference exact positions in the fix.
+        // Number each line so the model can reference exact line positions.
         String[] lines = document.split("\n", -1);
         StringBuilder numbered = new StringBuilder();
         for (int i = 0; i < lines.length; i++) {
-            numbered.append(String.format("%4d | %s%n", i + 1, lines[i]));
+            numbered.append(String.format("%4d | %s\n", i + 1, lines[i]));
         }
 
         return "You are a senior " + language + " code reviewer.\n"
             + "Return ONLY a raw JSON array — no markdown fences, no explanation.\n\n"
             + "Each object in the array must have exactly these fields:\n"
-            + "  \"line\"     : integer — 1-based line number\n"
+            + "  \"line\"     : integer — 1-based line number the comment refers to\n"
             + "  \"text\"     : string  — concise review comment (1-2 sentences)\n"
             + "  \"severity\" : \"info\" | \"warning\" | \"critical\"\n"
             + "  \"category\" : \"bug\" | \"style\" | \"performance\" | \"security\"\n"
-            + "  \"fix\"      : string — the FULL corrected text for that single line,\n"
-            + "                 with the same leading whitespace/indentation as the original.\n"
-            + "                 Use null ONLY if the correction requires touching more than one line.\n\n"
-            + "Rules for the fix field:\n"
-            + "  - Almost every comment should have a non-null fix.\n"
-            + "  - Copy the ENTIRE original line, apply exactly the correction described, return that.\n"
-            + "  - Do NOT add a newline at the end of the fix string.\n"
-            + "  - If the fix is to delete the line entirely, use an empty string \"\".\n"
-            + "  - Only use null when the problem spans multiple consecutive lines.\n\n"
+            + "  \"fix\"      : object or null.\n"
+            + "                 Always provide a non-null fix unless the problem is purely architectural.\n"
+            + "                 When non-null the object must have exactly:\n"
+            + "                   \"startLine\": integer — 1-based first line to replace\n"
+            + "                   \"endLine\"  : integer — 1-based last line to replace (inclusive)\n"
+            + "                   \"text\"     : string  — complete replacement for lines startLine..endLine,\n"
+            + "                                           preserving indentation; separate lines with \\n;\n"
+            + "                                           use \"\" to delete the range entirely.\n\n"
+            + "Examples:\n"
+            + "  Single-line style fix:  \"fix\": { \"startLine\": 5, \"endLine\": 5, \"text\": \"    x += 1\" }\n"
+            + "  Multi-line logic fix:   \"fix\": { \"startLine\": 2, \"endLine\": 4, \"text\": \"total = 0\\nfor n in numbers:\\n    total += n\" }\n\n"
             + "Limit output to the 10 most important comments. Return [] if there is nothing to say.\n\n"
             + "Code:\n"
             + numbered;
