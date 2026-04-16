@@ -384,6 +384,10 @@ public class CodeReviewServer extends WebSocketServer {
                     String fix = (c.has("fix") && !c.get("fix").isJsonNull())
                                  ? c.get("fix").getAsString() : null;
 
+                    System.out.println("[reviewThread] Comment line=" + line
+                            + " severity=" + severity
+                            + " fix=" + (fix != null ? "\"" + fix + "\"" : "null"));
+
                     // Persist so late-joining users receive it in SYNC
                     room.addComment(line, text, severity, category, fix);
 

@@ -49,7 +49,8 @@ function severityColor(severity) {
 // module-level reference to the active view's apply-fix function and update
 // it whenever the editor mounts or unmounts.  This is safe because only one
 // Editor instance is active at a time in this application.
-let _applyFixFn = null
+let _applyFixFn      = null
+let _removeCommentFn = null
 
 // ── Remote cursor infrastructure ──────────────────────────────────────────
 
@@ -129,6 +130,7 @@ const RemoteAnnotation = Annotation.define()
 
 const addCommentEffect    = StateEffect.define()
 const clearCommentsEffect = StateEffect.define()
+const removeCommentEffect = StateEffect.define()  // value: lineNum (number)
 
 // commentField stores Map<lineNum, Array<{text, severity, category, fix}>>
 const commentField = StateField.define({
@@ -144,6 +146,9 @@ const commentField = StateField.define({
         next.set(line, [...existing, { text, severity, category, fix: fix ?? null }])
       } else if (e.is(clearCommentsEffect)) {
         next = new Map()
+      } else if (e.is(removeCommentEffect)) {
+        if (next === map) next = new Map(map)
+        next.delete(e.value)
       }
     }
     return next
@@ -242,7 +247,6 @@ class CommentGutterMarker extends GutterMarker {
           'font-size:10px;color:#64748b;text-transform:uppercase;' +
           'letter-spacing:0.05em;margin-bottom:3px;'
 
-        // Show the fix code so the user knows what will be applied
         const fixCode = document.createElement('pre')
         fixCode.textContent = c.fix
         fixCode.style.cssText =
@@ -261,12 +265,12 @@ class CommentGutterMarker extends GutterMarker {
         fixBtn.addEventListener('mouseenter', () => { fixBtn.style.background = '#15803d' })
         fixBtn.addEventListener('mouseleave', () => { fixBtn.style.background = '#166534' })
 
-        // Capture loop variables so the closure is correct across iterations.
         const capturedLine = this.lineNum
         const capturedFix  = c.fix
         fixBtn.addEventListener('click', (e) => {
-          e.stopPropagation()           // don't bubble to the dot-toggle listener
+          e.stopPropagation()
           _applyFixFn?.(capturedLine, capturedFix)
+          _removeCommentFn?.(capturedLine)
           popup.style.display = 'none'
           open = false                  // eslint-disable-line no-use-before-define
         })
@@ -275,6 +279,30 @@ class CommentGutterMarker extends GutterMarker {
         fixSection.appendChild(fixCode)
         fixSection.appendChild(fixBtn)
         popup.appendChild(fixSection)
+      }
+
+      // ── Ignore button (always present) ─────────────────────────────────
+      // Only add it once, after all comments are rendered (on the last iteration)
+      if (i === this.comments.length - 1) {
+        const ignoreBtn = document.createElement('button')
+        ignoreBtn.textContent = 'Ignore'
+        ignoreBtn.style.cssText =
+          'display:block;width:100%;margin-top:8px;background:transparent;' +
+          'color:#475569;border:1px solid #334155;border-radius:4px;' +
+          'padding:4px 8px;font-size:11px;cursor:pointer;font-family:inherit;text-align:center;'
+
+        ignoreBtn.addEventListener('mouseenter', () => { ignoreBtn.style.color = '#94a3b8'; ignoreBtn.style.borderColor = '#475569' })
+        ignoreBtn.addEventListener('mouseleave', () => { ignoreBtn.style.color = '#475569'; ignoreBtn.style.borderColor = '#334155' })
+
+        const capturedLine = this.lineNum
+        ignoreBtn.addEventListener('click', (e) => {
+          e.stopPropagation()
+          _removeCommentFn?.(capturedLine)
+          popup.style.display = 'none'
+          open = false                  // eslint-disable-line no-use-before-define
+        })
+
+        popup.appendChild(ignoreBtn)
       }
     })
 
@@ -341,7 +369,7 @@ export default function Editor({ onLocalChange, onCursorMove, onReady, initialLa
           EditorView.theme({
             '&':                     { height: '100%', fontSize: '14px' },
             '.cm-scroller':          { overflow: 'auto', fontFamily: 'ui-monospace, monospace' },
-            '.cm-ai-comment-gutter': { width: '20px' },
+            '.cm-ai-comment-gutter': { width: '20px', overflow: 'visible' },
           }),
 
           EditorView.updateListener.of(update => {
@@ -360,6 +388,10 @@ export default function Editor({ onLocalChange, onCursorMove, onReady, initialLa
 
     // Wire up the module-level apply-fix bridge so gutter buttons can dispatch
     // edits to this view without needing a direct closure.
+    _removeCommentFn = (lineNum) => {
+      view.dispatch({ effects: removeCommentEffect.of(lineNum) })
+    }
+
     _applyFixFn = (lineNum, fixText) => {
       try {
         const line = view.state.doc.line(
@@ -404,7 +436,8 @@ export default function Editor({ onLocalChange, onCursorMove, onReady, initialLa
     })
 
     return () => {
-      _applyFixFn = null   // prevent stale view reference between StrictMode cycles
+      _applyFixFn      = null   // prevent stale view reference between StrictMode cycles
+      _removeCommentFn = null
       view.destroy()
     }
   }, []) // mount once — all updates go through imperative handles
