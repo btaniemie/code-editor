@@ -379,17 +379,25 @@ public class CodeReviewServer extends WebSocketServer {
                     String text     = c.has("text")     ? c.get("text").getAsString()     : "";
                     String severity = c.has("severity") ? c.get("severity").getAsString() : "info";
                     String category = c.has("category") ? c.get("category").getAsString() : "style";
-                    // fix is optional — null when the issue cannot be corrected by
-                    // replacing a single line (Gemini returns null or omits the field).
-                    String fix = (c.has("fix") && !c.get("fix").isJsonNull())
-                                 ? c.get("fix").getAsString() : null;
+                    // fix is an optional nested object {startLine, endLine, text}
+                    // Gemini returns null or omits the field when no edit can be expressed.
+                    Integer fixStartLine = null, fixEndLine = null;
+                    String  fixText      = null;
+                    if (c.has("fix") && !c.get("fix").isJsonNull() && c.get("fix").isJsonObject()) {
+                        JsonObject fixObj = c.get("fix").getAsJsonObject();
+                        fixStartLine = fixObj.has("startLine") ? fixObj.get("startLine").getAsInt()    : null;
+                        fixEndLine   = fixObj.has("endLine")   ? fixObj.get("endLine").getAsInt()      : null;
+                        fixText      = fixObj.has("text")      ? fixObj.get("text").getAsString()      : null;
+                    }
 
                     System.out.println("[reviewThread] Comment line=" + line
                             + " severity=" + severity
-                            + " fix=" + (fix != null ? "\"" + fix + "\"" : "null"));
+                            + " fix=" + (fixText != null
+                                ? "lines " + fixStartLine + "-" + fixEndLine + " -> \"" + fixText + "\""
+                                : "null"));
 
                     // Persist so late-joining users receive it in SYNC
-                    room.addComment(line, text, severity, category, fix);
+                    room.addComment(line, text, severity, category, fixStartLine, fixEndLine, fixText);
 
                     // Broadcast to every client in the room over their TCP connections
                     JsonObject aiComment = new JsonObject();
@@ -398,7 +406,13 @@ public class CodeReviewServer extends WebSocketServer {
                     aiComment.addProperty("text",     text);
                     aiComment.addProperty("severity", severity);
                     aiComment.addProperty("category", category);
-                    if (fix != null) aiComment.addProperty("fix", fix);
+                    if (fixStartLine != null && fixEndLine != null && fixText != null) {
+                        JsonObject fixBcast = new JsonObject();
+                        fixBcast.addProperty("startLine", fixStartLine);
+                        fixBcast.addProperty("endLine",   fixEndLine);
+                        fixBcast.addProperty("text",      fixText);
+                        aiComment.add("fix", fixBcast);
+                    }
                     room.broadcast(gson.toJson(aiComment));
                 }
 
