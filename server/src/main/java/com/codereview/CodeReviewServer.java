@@ -362,10 +362,11 @@ public class CodeReviewServer extends WebSocketServer {
         room.deleteFile(path);
 
         // If the deleted file was the active file, point activeFile to the
-        // first remaining file (or empty string if no files remain).
+        // first remaining file.  Only update if a next file actually exists —
+        // leaving activeFile on a deleted path is harmless; setting it to ""
+        // would cause the run command to receive an empty filename argument.
         if (path.equals(room.getActiveFile())) {
-            String next = room.getFiles().keySet().stream().findFirst().orElse("");
-            room.setActiveFile(next);
+            room.getFiles().keySet().stream().findFirst().ifPresent(room::setActiveFile);
         }
 
         System.out.println("[handleFileDelete] '" + userId + "' deleted file '"

@@ -76,6 +76,12 @@ public class ExecutionManager {
                 }
 
                 // ── 3. Run ────────────────────────────────────────────────────
+                if (activeFile == null || activeFile.isBlank()) {
+                    broadcast(room, runError("No active file selected. Click a file in the tree before running."));
+                    broadcast(room, runDone());
+                    return;
+                }
+
                 List<String> runCmd = buildRunCommand(language, activeFile);
                 if (runCmd == null) {
                     broadcast(room, runError("Unsupported language: " + language));

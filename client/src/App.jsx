@@ -644,115 +644,96 @@ export default function App() {
 
             <UserList users={users} currentUserId={session.userId} speakingUsers={speakingUsers} />
 
-            {/* Push-to-Talk */}
-            <div className="px-4 py-3 border-t border-gray-800 flex-shrink-0">
-              <p className="text-xs text-gray-500 uppercase tracking-widest mb-1.5">Voice</p>
-              <button
-                onMouseDown={() => startSpeaking(session.userId)}
-                onMouseUp={() => stopSpeaking(session.userId)}
-                onMouseLeave={() => { if (isSpeaking) stopSpeaking(session.userId) }}
-                disabled={micAvailable === false || isDisconnected}
-                className={`w-full text-sm rounded px-3 py-2 font-medium transition-colors select-none
-                  ${isSpeaking
-                    ? 'bg-red-700 text-white ring-2 ring-red-400'
-                    : micAvailable === false || isDisconnected
-                      ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                      : 'bg-gray-700 hover:bg-gray-600 text-gray-200 cursor-pointer'
-                  }`}
-              >
-                <span className="flex items-center justify-center gap-2">
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 1a4 4 0 0 1 4 4v7a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 18.93V22h2v-2.07A8.001 8.001 0 0 0 20 12h-2a6 6 0 0 1-12 0H4a8.001 8.001 0 0 0 7 7.93z"/>
-                  </svg>
-                  {isSpeaking ? 'Speaking...' : micAvailable === false ? 'Mic unavailable' : 'Hold to Talk'}
-                </span>
-              </button>
-            </div>
+            {/* ── Tools section: language + run + review + voice ── */}
+            <div className="px-3 py-3 border-t border-gray-800 flex-shrink-0 space-y-2 mt-auto">
 
-            {/* Language selector */}
-            <div className="px-4 py-3 border-t border-gray-800 flex-shrink-0">
-              <p className="text-xs text-gray-500 uppercase tracking-widest mb-1.5">Language</p>
+              {/* Language selector */}
               <select
                 value={language}
                 onChange={e => handleLanguageChange(e.target.value)}
-                className="w-full bg-gray-800 text-gray-200 text-xs rounded px-2.5 py-1.5
+                className="w-full bg-gray-800 text-gray-200 text-xs rounded px-2 py-1.5
                            border border-gray-700 outline-none focus:border-emerald-600 cursor-pointer"
               >
                 {LANGUAGES.map(l => (
                   <option key={l.value} value={l.value}>{l.label}</option>
                 ))}
               </select>
-            </div>
 
-            {/* Run button */}
-            <div className="px-4 pb-2 flex-shrink-0">
+              {/* Push-to-Talk */}
               <button
-                onClick={handleRunCode}
-                disabled={runInProgress || isDisconnected}
-                className={`w-full text-sm rounded px-3 py-2 font-medium transition-colors
-                  ${runInProgress || isDisconnected
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-green-900 hover:bg-green-800 text-green-100 cursor-pointer'
+                onMouseDown={() => startSpeaking(session.userId)}
+                onMouseUp={() => stopSpeaking(session.userId)}
+                onMouseLeave={() => { if (isSpeaking) stopSpeaking(session.userId) }}
+                disabled={micAvailable === false || isDisconnected}
+                className={`w-full text-xs rounded px-2 py-1.5 font-medium transition-colors select-none
+                  ${isSpeaking
+                    ? 'bg-red-700 text-white ring-1 ring-red-400'
+                    : micAvailable === false || isDisconnected
+                      ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                      : 'bg-gray-700 hover:bg-gray-600 text-gray-300 cursor-pointer'
                   }`}
               >
-                {runInProgress ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-green-400 rounded-full animate-spin" />
-                    Running…
-                  </span>
-                ) : (
-                  <span className="flex items-center justify-center gap-2">
-                    {/* Play icon */}
-                    <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
-                    </svg>
-                    Run
-                  </span>
-                )}
+                {isSpeaking ? 'Speaking...' : micAvailable === false ? 'Mic unavailable' : 'Hold to Talk'}
               </button>
-            </div>
 
-            {/* Request Review button */}
-            <div className="px-4 pb-3 flex-shrink-0">
-              <button
-                onClick={handleRequestReview}
-                disabled={reviewInProgress || isDisconnected}
-                className={`w-full text-sm rounded px-3 py-2 font-medium transition-colors
-                  ${reviewInProgress || isDisconnected
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-emerald-800 hover:bg-emerald-700 text-emerald-100 cursor-pointer'
-                  }`}
-              >
-                {reviewInProgress ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-emerald-400 rounded-full animate-spin" />
-                    Reviewing…
-                  </span>
-                ) : (
-                  'Request AI Review'
-                )}
-              </button>
-            </div>
-
-            {/* Status + reconnect + leave */}
-            <div className="px-4 py-3 border-t border-gray-800 space-y-2 flex-shrink-0 mt-auto">
-              <p className={`text-xs truncate ${isDisconnected ? 'text-red-400' : 'text-gray-500'}`}>
-                {status}
-              </p>
-              {isDisconnected && (
+              {/* Run + AI Review side by side */}
+              <div className="flex gap-2">
                 <button
-                  onClick={handleReconnect}
-                  className="w-full text-sm bg-emerald-900 hover:bg-emerald-800 text-emerald-300 rounded px-3 py-1.5 transition-colors"
+                  onClick={handleRunCode}
+                  disabled={runInProgress || isDisconnected}
+                  title="Run code"
+                  className={`flex-1 text-xs rounded px-2 py-1.5 font-medium transition-colors flex items-center justify-center gap-1.5
+                    ${runInProgress || isDisconnected
+                      ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                      : 'bg-green-900 hover:bg-green-800 text-green-100 cursor-pointer'
+                    }`}
                 >
-                  Reconnect
+                  {runInProgress
+                    ? <><span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-green-400 rounded-full animate-spin" /> Running…</>
+                    : <><svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" /></svg> Run</>
+                  }
                 </button>
-              )}
-              <button
-                onClick={handleLeave}
-                className="w-full text-sm bg-gray-800 hover:bg-red-900 text-gray-300 hover:text-red-200 rounded px-3 py-1.5 transition-colors"
-              >
-                Leave room
-              </button>
+
+                <button
+                  onClick={handleRequestReview}
+                  disabled={reviewInProgress || isDisconnected}
+                  title="Request AI review"
+                  className={`flex-1 text-xs rounded px-2 py-1.5 font-medium transition-colors flex items-center justify-center gap-1.5
+                    ${reviewInProgress || isDisconnected
+                      ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                      : 'bg-emerald-800 hover:bg-emerald-700 text-emerald-100 cursor-pointer'
+                    }`}
+                >
+                  {reviewInProgress
+                    ? <><span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-emerald-400 rounded-full animate-spin" /> Review…</>
+                    : <>
+                        <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" /></svg>
+                        AI Review
+                      </>
+                  }
+                </button>
+              </div>
+
+              {/* Footer: status + reconnect + leave */}
+              <div className="flex items-center gap-2 pt-1">
+                {isDisconnected ? (
+                  <button
+                    onClick={handleReconnect}
+                    className="flex-1 text-xs bg-emerald-900 hover:bg-emerald-800 text-emerald-300 rounded px-2 py-1.5 transition-colors"
+                  >
+                    Reconnect
+                  </button>
+                ) : (
+                  <p className="flex-1 text-xs text-gray-600 truncate">{status}</p>
+                )}
+                <button
+                  onClick={handleLeave}
+                  title="Leave room"
+                  className="flex-shrink-0 text-xs bg-gray-800 hover:bg-red-900/60 text-gray-500 hover:text-red-300 rounded px-2 py-1.5 transition-colors"
+                >
+                  Leave
+                </button>
+              </div>
             </div>
           </aside>
 
