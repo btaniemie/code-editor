@@ -1,9 +1,10 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import JoinScreen    from './components/JoinScreen'
 import UserList      from './components/UserList'
 import Editor        from './components/Editor'
 import CommentsPanel from './components/CommentsPanel'
 import ChatPanel     from './components/ChatPanel'
+import { useVoiceChat } from './hooks/useVoiceChat'
 
 const SERVER_URL = 'ws://localhost:8080'
 
@@ -109,6 +110,18 @@ export default function App() {
 
   const wsRef = useRef(null)
 
+  // ── Voice chat ──────────────────────────────────────────────────────────
+  const {
+    isSpeaking, speakingUsers, micAvailable,
+    onBinaryMessage, onVoiceStatus,
+    startSpeaking, stopSpeaking, cleanup: voiceCleanup,
+  } = useVoiceChat(wsRef)
+
+  // Stable ref so connectWS (empty-deps useCallback) always calls the latest
+  // binary handler without needing to be recreated.
+  const onBinaryMessageRef = useRef(onBinaryMessage)
+  useEffect(() => { onBinaryMessageRef.current = onBinaryMessage }, [onBinaryMessage])
+
   // Imperative CodeMirror handles
   const applyEditRef        = useRef(null)
   const applyCursorRef      = useRef(null)
@@ -146,6 +159,11 @@ export default function App() {
       setStatus('Connected')
     }
     ws.onmessage = (event) => {
+      // Binary frames carry raw audio (VOICE_CHUNK) — route to the voice hook.
+      if (event.data instanceof Blob) {
+        event.data.arrayBuffer().then(buf => onBinaryMessageRef.current?.(buf))
+        return
+      }
       handleMessage(JSON.parse(event.data), userId, roomCode)
     }
     ws.onclose = () => setStatus('Disconnected')
@@ -298,6 +316,10 @@ export default function App() {
         break
       }
 
+      case 'VOICE_STATUS':
+        onVoiceStatus({ userId: msg.userId, speaking: msg.speaking })
+        break
+
       default:
         console.log('Unknown message type:', msg.type)
     }
@@ -400,6 +422,7 @@ export default function App() {
   }, [session?.userId])
 
   const handleLeave = useCallback(() => {
+    voiceCleanup()
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({ type: 'USER_LEAVE' }))
       wsRef.current.close()
@@ -458,7 +481,33 @@ export default function App() {
               </button>
             </div>
 
-            <UserList users={users} currentUserId={session.userId} />
+            <UserList users={users} currentUserId={session.userId} speakingUsers={speakingUsers} />
+
+            {/* Push-to-Talk */}
+            <div className="px-4 py-3 border-t border-gray-800 flex-shrink-0">
+              <p className="text-xs text-gray-500 uppercase tracking-widest mb-1.5">Voice</p>
+              <button
+                onMouseDown={() => startSpeaking(session.userId)}
+                onMouseUp={() => stopSpeaking(session.userId)}
+                onMouseLeave={() => { if (isSpeaking) stopSpeaking(session.userId) }}
+                disabled={micAvailable === false || isDisconnected}
+                className={`w-full text-sm rounded px-3 py-2 font-medium transition-colors select-none
+                  ${isSpeaking
+                    ? 'bg-red-700 text-white ring-2 ring-red-400'
+                    : micAvailable === false || isDisconnected
+                      ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                      : 'bg-gray-700 hover:bg-gray-600 text-gray-200 cursor-pointer'
+                  }`}
+              >
+                <span className="flex items-center justify-center gap-2">
+                  {/* Mic icon */}
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 1a4 4 0 0 1 4 4v7a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 18.93V22h2v-2.07A8.001 8.001 0 0 0 20 12h-2a6 6 0 0 1-12 0H4a8.001 8.001 0 0 0 7 7.93z"/>
+                  </svg>
+                  {isSpeaking ? 'Speaking...' : micAvailable === false ? 'Mic unavailable' : 'Hold to Talk'}
+                </span>
+              </button>
+            </div>
 
             {/* Language selector */}
             <div className="px-4 py-3 border-t border-gray-800 flex-shrink-0">
