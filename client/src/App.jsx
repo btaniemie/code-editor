@@ -4,6 +4,8 @@ import UserList      from './components/UserList'
 import Editor        from './components/Editor'
 import CommentsPanel from './components/CommentsPanel'
 import ChatPanel     from './components/ChatPanel'
+import FileTree      from './components/FileTree'
+import OutputPanel   from './components/OutputPanel'
 import { useVoiceChat } from './hooks/useVoiceChat'
 
 const SERVER_URL = 'ws://localhost:8080'
@@ -89,6 +91,8 @@ function CollapsedStrip({ side, label, onOpen }) {
   )
 }
 
+// ── App ─────────────────────────────────────────────────────────────────────
+
 export default function App() {
   const [session,          setSession]          = useState(null)
   const [users,            setUsers]            = useState([])
@@ -98,31 +102,47 @@ export default function App() {
   const [chat,             setChat]             = useState([])
   const [language,         setLanguage]         = useState('javascript')
 
-  // Panel open/close
+  // ── File tree state ─────────────────────────────────────────────────────
+  //
+  // filesRef is the authoritative in-memory store of path->content.
+  // Updated synchronously on local edits and incoming EDIT/SYNC frames so
+  // file-switching can restore content without a React re-render round-trip.
+  //
+  // filePaths is the React state counterpart used only to re-render FileTree.
+  // activeFile / activeFileRef mirror each other (state for rendering,
+  // ref for use inside stale WebSocket-closure callbacks).
+  const filesRef        = useRef({ 'main.js': '' })
+  const [filePaths,    setFilePaths]    = useState(['main.js'])
+  const [activeFile,   setActiveFile]   = useState('main.js')
+  const activeFileRef  = useRef('main.js')
+
+  // ── Run / output state ─────────────────────────────────────────────────
+  const [outputLines,    setOutputLines]    = useState([])
+  const [runInProgress,  setRunInProgress]  = useState(false)
+  const [outputOpen,     setOutputOpen]     = useState(false)
+  const [outputHeight,   setOutputHeight]   = useState(200)
+
+  // ── Panel layout ───────────────────────────────────────────────────────
   const [leftOpen,   setLeftOpen]   = useState(true)
   const [rightOpen,  setRightOpen]  = useState(true)
   const [bottomOpen, setBottomOpen] = useState(true)
-
-  // Panel dimensions in pixels
   const [leftWidth,    setLeftWidth]    = useState(224)
   const [rightWidth,   setRightWidth]   = useState(288)
   const [bottomHeight, setBottomHeight] = useState(176)
 
   const wsRef = useRef(null)
 
-  // ── Voice chat ──────────────────────────────────────────────────────────
+  // ── Voice chat ─────────────────────────────────────────────────────────
   const {
     isSpeaking, speakingUsers, micAvailable,
     onBinaryMessage, onVoiceStatus,
     startSpeaking, stopSpeaking, cleanup: voiceCleanup,
   } = useVoiceChat(wsRef)
 
-  // Stable ref so connectWS (empty-deps useCallback) always calls the latest
-  // binary handler without needing to be recreated.
   const onBinaryMessageRef = useRef(onBinaryMessage)
   useEffect(() => { onBinaryMessageRef.current = onBinaryMessage }, [onBinaryMessage])
 
-  // Imperative CodeMirror handles
+  // ── Imperative CodeMirror handles ──────────────────────────────────────
   const applyEditRef        = useRef(null)
   const applyCursorRef      = useRef(null)
   const removeCursorRef     = useRef(null)
@@ -130,25 +150,28 @@ export default function App() {
   const clearCommentsRef    = useRef(null)
   const setEditorLanguageRef = useRef(null)
 
-  // Content that arrived before the editor mounted
-  const pendingEditRef     = useRef(null)
+  // ── Pending state (arrived before editor mounted) ─────────────────────
+  // Stores { files: {...}, activeFile: '...' } when SYNC arrives before Editor mounts.
+  const pendingFilesRef    = useRef(null)
   const pendingCursorsRef  = useRef(null)
   const pendingCommentsRef = useRef(null)
   const pendingLanguageRef = useRef(null)
 
-  // Guard: prevents EDIT messages from being sent before the initial SYNC has
-  // been received and applied to the local editor.  Without this guard, a new
-  // joiner whose editor starts empty could send an EDIT that overwrites the
-  // room's document for everyone.
-  //
-  // Set to true when:
-  //   • SYNC is received and the document is applied via applyEditRef directly, OR
-  //   • SYNC was queued as pending and is applied inside onEditorReady.
-  // Reset to false on leave or reconnect so every new WebSocket session waits
-  // for its own SYNC before it can write.
+  // Prevents EDIT messages from being sent before the initial SYNC is applied.
   const syncReceivedRef = useRef(false)
 
-  // ── WebSocket connection ────────────────────────────────────────────────
+  // ── Auto-switch away from a deleted active file ────────────────────────
+  useEffect(() => {
+    if (!session) return
+    if (!(activeFile in filesRef.current) && filePaths.length > 0) {
+      const first = filePaths[0]
+      setActiveFile(first)
+      activeFileRef.current = first
+      applyEditRef.current?.(filesRef.current[first] ?? '')
+    }
+  }, [filePaths, activeFile, session])
+
+  // ── WebSocket connection ───────────────────────────────────────────────
 
   const connectWS = useCallback((userId, roomCode) => {
     const ws = new WebSocket(SERVER_URL)
@@ -159,7 +182,6 @@ export default function App() {
       setStatus('Connected')
     }
     ws.onmessage = (event) => {
-      // Binary frames carry raw audio (VOICE_CHUNK) — route to the voice hook.
       if (event.data instanceof Blob) {
         event.data.arrayBuffer().then(buf => onBinaryMessageRef.current?.(buf))
         return
@@ -168,28 +190,37 @@ export default function App() {
     }
     ws.onclose = () => setStatus('Disconnected')
     ws.onerror = () => setStatus('Connection error')
-  }, [])
+  }, []) // stable — all updates go through refs
 
   const handleJoin = useCallback((userId, roomCode) => {
     connectWS(userId, roomCode)
   }, [connectWS])
 
-  // ── Reconnect — reuse session, reset local state, open a fresh WebSocket ──
+  // ── Reconnect ──────────────────────────────────────────────────────────
 
   const handleReconnect = useCallback(() => {
     if (!session) return
     if (wsRef.current) wsRef.current.close()
-    // Reset sync guard so the reconnecting client waits for its fresh SYNC
-    // before it can send EDIT messages on the new TCP connection.
-    syncReceivedRef.current = false
+    syncReceivedRef.current  = false
+    filesRef.current         = {}
+    pendingFilesRef.current  = null
+    setFilePaths([])
+    setActiveFile('main.js')
+    activeFileRef.current = 'main.js'
     setComments([])
     setChat([])
     setReviewInProgress(false)
+    setOutputLines([])
+    setRunInProgress(false)
     clearCommentsRef.current?.()
     connectWS(session.userId, session.roomCode)
   }, [session, connectWS])
 
-  // ── Client-side message router ──────────────────────────────────────────
+  // ── Client-side message router ─────────────────────────────────────────
+  //
+  // NOTE: handleMessage lives inside the connectWS closure, so `userId` and
+  // `roomCode` are captured at connection time (stable strings).
+  // State reads happen through refs; state writes use stable setState fns.
 
   function handleMessage(msg, userId, roomCode) {
     switch (msg.type) {
@@ -204,23 +235,26 @@ export default function App() {
         removeCursorRef.current?.(msg.userId)
         break
 
-      // SYNC is a unicast message sent by the server only to the newly-joining
-      // client.  It carries the full authoritative room state so the joiner
-      // starts in sync with everyone else.
-      //
-      // After applying (or staging) the document we mark syncReceivedRef=true
-      // so that onLocalChange is allowed to send EDIT messages.  This prevents
-      // the race where the new user types before their editor is populated and
-      // their EDIT (containing only their few keystrokes) wipes the room doc.
+      // ── SYNC: full room state sent to a newly-joining client ─────────
+      // The SYNC message now carries a `files` map + `activeFile` instead
+      // of a single `document` string, matching the updated server protocol.
       case 'SYNC': {
+        const newFiles  = msg.files      ?? {}
+        const newActive = msg.activeFile ?? Object.keys(newFiles)[0] ?? 'main.js'
+
+        // Update the authoritative in-memory file store and React state.
+        filesRef.current = { ...newFiles }
+        setFilePaths(Object.keys(newFiles))
+        setActiveFile(newActive)
+        activeFileRef.current = newActive
+
         if (applyEditRef.current) {
-          // Editor already mounted — apply directly.
-          applyEditRef.current(msg.document)
+          // Editor is already mounted — apply active file content directly.
+          applyEditRef.current(newFiles[newActive] ?? '')
           syncReceivedRef.current = true
         } else {
           // Editor not mounted yet — stage for onEditorReady.
-          // syncReceivedRef will be set there after the document is applied.
-          pendingEditRef.current = msg.document
+          pendingFilesRef.current = { files: newFiles, activeFile: newActive }
         }
 
         if (msg.cursors && Object.keys(msg.cursors).length > 0) {
@@ -243,36 +277,78 @@ export default function App() {
           }
         }
 
-        if (msg.chat && msg.chat.length > 0) {
-          setChat(msg.chat)
-        }
+        if (msg.chat && msg.chat.length > 0) setChat(msg.chat)
 
-        // Restore the room's language — updates both React state and CodeMirror
         if (msg.language) {
           setLanguage(msg.language)
-          if (setEditorLanguageRef.current) {
-            setEditorLanguageRef.current(msg.language)
-          } else {
-            pendingLanguageRef.current = msg.language
-          }
+          if (setEditorLanguageRef.current) setEditorLanguageRef.current(msg.language)
+          else pendingLanguageRef.current = msg.language
         }
         break
       }
 
-      case 'EDIT':
-        applyEditRef.current?.(msg.content)
+      // ── EDIT: another client changed a file ──────────────────────────
+      // Update our in-memory cache. Only apply to the editor if the edited
+      // file is the one currently viewed — other files are updated silently.
+      case 'EDIT': {
+        const fp = msg.filePath ?? activeFileRef.current
+        filesRef.current[fp] = msg.content
+        if (fp === activeFileRef.current) {
+          applyEditRef.current?.(msg.content)
+        }
         break
+      }
 
       case 'CURSOR':
         applyCursorRef.current?.(msg.userId, msg.pos)
         break
 
-      // A user changed the room's language — update highlighting for everyone
       case 'LANGUAGE_CHANGE':
         setLanguage(msg.language)
         setEditorLanguageRef.current?.(msg.language)
         break
 
+      // ── File tree events ─────────────────────────────────────────────
+      case 'FILE_CREATE': {
+        filesRef.current[msg.path] = msg.content ?? ''
+        setFilePaths(prev => prev.includes(msg.path) ? prev : [...prev, msg.path])
+        // Auto-switch to the new file for the user who created it.
+        if (msg.userId === userId) {
+          setActiveFile(msg.path)
+          activeFileRef.current = msg.path
+          applyEditRef.current?.(msg.content ?? '')
+        }
+        break
+      }
+
+      case 'FILE_DELETE': {
+        delete filesRef.current[msg.path]
+        setFilePaths(prev => prev.filter(p => p !== msg.path))
+        // The useEffect above handles switching away if activeFile was deleted.
+        break
+      }
+
+      case 'FILE_RENAME': {
+        const content = filesRef.current[msg.oldPath] ?? ''
+        filesRef.current[msg.newPath] = content
+        delete filesRef.current[msg.oldPath]
+        setFilePaths(prev => prev.map(p => p === msg.oldPath ? msg.newPath : p))
+        if (activeFileRef.current === msg.oldPath) {
+          setActiveFile(msg.newPath)
+          activeFileRef.current = msg.newPath
+        }
+        break
+      }
+
+      case 'FILE_SWITCH': {
+        // Another user switched files — follow them to the same file.
+        setActiveFile(msg.path)
+        activeFileRef.current = msg.path
+        applyEditRef.current?.(filesRef.current[msg.path] ?? '')
+        break
+      }
+
+      // ── AI review events ─────────────────────────────────────────────
       case 'REVIEW_START':
         setReviewInProgress(true)
         setComments([])
@@ -295,16 +371,44 @@ export default function App() {
         setStatus('AI error: ' + msg.text)
         break
 
+      // ── Code execution events ────────────────────────────────────────
+      // RUN_START: server started execution — all clients enter running state.
+      case 'RUN_START':
+        setOutputLines([])
+        setRunInProgress(true)
+        setOutputOpen(true)
+        break
+
+      // RUN_OUTPUT: one line from the child process stdout/stderr pipe,
+      // streamed over WebSocket as it arrives (bridging process I/O and TCP).
+      case 'RUN_OUTPUT':
+        setOutputLines(prev => [...prev, { text: msg.line, isError: false }])
+        break
+
+      case 'RUN_DONE':
+        setRunInProgress(false)
+        break
+
+      case 'RUN_ERROR':
+        setOutputLines(prev => [...prev, { text: 'Error: ' + msg.text, isError: true }])
+        setRunInProgress(false)
+        break
+
+      case 'RUN_TIMEOUT':
+        setOutputLines(prev => [...prev, { text: msg.text, isError: true }])
+        setRunInProgress(false)
+        break
+
+      // ── Chat ────────────────────────────────────────────────────────
       case 'CHAT': {
-        const chatMsg = {
+        setChat(prev => [...prev, {
           userId:    msg.userId,
           text:      msg.text,
           timestamp: msg.timestamp,
           replyTo:   msg.replyTo ?? null,
           system:    msg.userId === 'system',
           private:   msg.private ?? false,
-        }
-        setChat(prev => [...prev, chatMsg])
+        }])
         break
       }
 
@@ -325,21 +429,16 @@ export default function App() {
     }
   }
 
-  // ── Editor ready callback ───────────────────────────────────────────────
+  // ── Editor ready callback ──────────────────────────────────────────────
   //
-  // Called by Editor.jsx once the CodeMirror view is constructed and its
-  // imperative handles are available.  We apply any state that arrived over
-  // the WebSocket before the editor finished mounting.
+  // Called by Editor.jsx once CodeMirror is constructed and imperative handles
+  // are available.  Apply any state that arrived before the editor mounted.
   //
-  // IMPORTANT — we intentionally do NOT clear the pending refs after applying
-  // them.  React.StrictMode double-invokes effects in development:
-  //   mount → cleanup (view destroyed) → remount
-  // If we cleared pendingEditRef.current on the first invocation, the second
-  // invocation (on the real, surviving view) would find null and leave the
-  // editor blank.  Keeping the values means both invocations apply the same
-  // content; the equality guard inside applyEdit makes the second apply a
-  // no-op when the content is unchanged, so there is no visible duplication.
-  // The pending refs are only truly cleared in handleLeave (session end).
+  // We intentionally do NOT clear the pending refs after applying them because
+  // React StrictMode double-invokes effects: mount → cleanup → remount.
+  // Keeping the values ensures the second (surviving) invocation also applies
+  // the correct content.  The equality guard inside applyEdit makes the second
+  // apply a no-op when content is unchanged.
 
   const onEditorReady = useCallback(({
     applyEdit, applyCursor, removeCursor, addComment, clearComments, setLanguage: setLang,
@@ -351,41 +450,40 @@ export default function App() {
     clearCommentsRef.current     = clearComments
     setEditorLanguageRef.current = setLang
 
-    if (pendingEditRef.current !== null) {
-      applyEdit(pendingEditRef.current)
-      // Mark sync as received now that the document has been applied to the
-      // editor.  From this point onLocalChange is allowed to send EDIT frames.
+    if (pendingFilesRef.current !== null) {
+      const { files: f, activeFile: af } = pendingFilesRef.current
+      applyEdit(f[af] ?? '')
       syncReceivedRef.current = true
-      // Intentionally NOT clearing pendingEditRef.current — see note above.
     }
     if (pendingCursorsRef.current !== null) {
       for (const [uid, pos] of Object.entries(pendingCursorsRef.current))
         applyCursor(uid, pos)
-      // Intentionally NOT clearing — see note above.
     }
     if (pendingCommentsRef.current !== null) {
       clearComments()
       for (const c of pendingCommentsRef.current)
         addComment(c.line, c.text, c.severity, c.category, c.fix ?? null)
-      // Intentionally NOT clearing — see note above.
     }
     if (pendingLanguageRef.current !== null) {
       setLang(pendingLanguageRef.current)
-      // Intentionally NOT clearing — see note above.
     }
   }, [])
 
-  // ── Outbound message senders ────────────────────────────────────────────
+  // ── Outbound message senders ───────────────────────────────────────────
 
+  // EDIT: include filePath so the server routes the change to the correct file.
   const onLocalChange = useCallback((content) => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    // Do not send EDIT until the initial SYNC has been received and its
-    // document has been applied to our local editor.  Before that point our
-    // editor is still empty; sending an EDIT now would broadcast empty (or
-    // partially-typed) content to all other clients, wiping their documents.
     if (!syncReceivedRef.current) return
-    ws.send(JSON.stringify({ type: 'EDIT', userId: session?.userId, content }))
+    // Keep our local cache in sync so file-switching restores the latest content.
+    filesRef.current[activeFileRef.current] = content
+    ws.send(JSON.stringify({
+      type:     'EDIT',
+      userId:   session?.userId,
+      filePath: activeFileRef.current,
+      content,
+    }))
   }, [session?.userId])
 
   const onCursorMove = useCallback((pos) => {
@@ -394,8 +492,6 @@ export default function App() {
     ws.send(JSON.stringify({ type: 'CURSOR', userId: session?.userId, pos }))
   }, [session?.userId])
 
-  // Language change: update locally immediately, then tell the server so all
-  // other clients in the room get a LANGUAGE_CHANGE broadcast.
   const handleLanguageChange = useCallback((lang) => {
     setLanguage(lang)
     setEditorLanguageRef.current?.(lang)
@@ -408,11 +504,7 @@ export default function App() {
   const handleRequestReview = useCallback(() => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify({
-      type:     'REVIEW_REQUEST',
-      userId:   session?.userId,
-      language,          // send current room language, not hardcoded 'javascript'
-    }))
+    ws.send(JSON.stringify({ type: 'REVIEW_REQUEST', userId: session?.userId, language }))
   }, [session?.userId, language])
 
   const handleSendChat = useCallback((text) => {
@@ -420,6 +512,53 @@ export default function App() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ type: 'CHAT', userId: session?.userId, text, replyTo: null }))
   }, [session?.userId])
+
+  // ── File tree operations ───────────────────────────────────────────────
+
+  const handleFileCreate = useCallback((path) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'FILE_CREATE', userId: session?.userId, path, content: '' }))
+  }, [session?.userId])
+
+  const handleFileDelete = useCallback((path) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'FILE_DELETE', userId: session?.userId, path }))
+  }, [session?.userId])
+
+  const handleFileRename = useCallback((oldPath, newPath) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'FILE_RENAME', userId: session?.userId, oldPath, newPath }))
+  }, [session?.userId])
+
+  // FILE_SWITCH: switch locally first for instant feedback, then notify server
+  // so it updates room.activeFile (for reviews) and broadcasts to other clients.
+  const handleFileSwitch = useCallback((path) => {
+    setActiveFile(path)
+    activeFileRef.current = path
+    applyEditRef.current?.(filesRef.current[path] ?? '')
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'FILE_SWITCH', userId: session?.userId, path }))
+    }
+  }, [session?.userId])
+
+  // ── Code execution ─────────────────────────────────────────────────────
+  //
+  // Sends RUN_REQUEST to the server, which:
+  //   1. Broadcasts RUN_START to all clients (sets running state here)
+  //   2. Writes files to a temp dir (ProcessBuilder I/O)
+  //   3. Streams stdout/stderr as RUN_OUTPUT frames over TCP/WebSocket
+
+  const handleRunCode = useCallback(() => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ type: 'RUN_REQUEST', userId: session?.userId }))
+  }, [session?.userId])
+
+  // ── Leave ──────────────────────────────────────────────────────────────
 
   const handleLeave = useCallback(() => {
     voiceCleanup()
@@ -434,11 +573,13 @@ export default function App() {
     addCommentRef.current        = null
     clearCommentsRef.current     = null
     setEditorLanguageRef.current = null
-    pendingEditRef.current       = null
+    pendingFilesRef.current      = null
     pendingCursorsRef.current    = null
     pendingCommentsRef.current   = null
     pendingLanguageRef.current   = null
     syncReceivedRef.current      = false
+    filesRef.current             = { 'main.js': '' }
+    activeFileRef.current        = 'main.js'
     setSession(null)
     setUsers([])
     setStatus('')
@@ -446,9 +587,13 @@ export default function App() {
     setReviewInProgress(false)
     setChat([])
     setLanguage('javascript')
-  }, [])
+    setFilePaths(['main.js'])
+    setActiveFile('main.js')
+    setOutputLines([])
+    setRunInProgress(false)
+  }, [voiceCleanup])
 
-  // ── Render ──────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────
 
   if (!session) {
     return <JoinScreen onJoin={handleJoin} />
@@ -459,14 +604,14 @@ export default function App() {
   return (
     <div className="flex h-screen bg-gray-950 text-gray-100 overflow-hidden">
 
-      {/* ── Left sidebar or collapsed strip ── */}
+      {/* ── Left sidebar ── */}
       {leftOpen ? (
         <>
           <aside
             style={{ width: leftWidth }}
             className="flex-shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden"
           >
-            {/* Room header + close button */}
+            {/* Room header */}
             <div className="px-4 py-3 border-b border-gray-800 flex-shrink-0 flex items-start justify-between">
               <div className="min-w-0">
                 <p className="text-xs text-gray-400 uppercase tracking-widest">Room</p>
@@ -479,6 +624,22 @@ export default function App() {
               >
                 <ChevronLeft />
               </button>
+            </div>
+
+            {/* ── File tree section ── */}
+            <div
+              className="border-b border-gray-800 flex-shrink-0 overflow-hidden"
+              style={{ maxHeight: '38%', minHeight: 80 }}
+            >
+              <FileTree
+                filePaths={filePaths}
+                activeFile={activeFile}
+                onFileSelect={handleFileSwitch}
+                onFileCreate={handleFileCreate}
+                onFileDelete={handleFileDelete}
+                onFileRename={handleFileRename}
+                isDisconnected={isDisconnected}
+              />
             </div>
 
             <UserList users={users} currentUserId={session.userId} speakingUsers={speakingUsers} />
@@ -500,7 +661,6 @@ export default function App() {
                   }`}
               >
                 <span className="flex items-center justify-center gap-2">
-                  {/* Mic icon */}
                   <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M12 1a4 4 0 0 1 4 4v7a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 18.93V22h2v-2.07A8.001 8.001 0 0 0 20 12h-2a6 6 0 0 1-12 0H4a8.001 8.001 0 0 0 7 7.93z"/>
                   </svg>
@@ -516,13 +676,40 @@ export default function App() {
                 value={language}
                 onChange={e => handleLanguageChange(e.target.value)}
                 className="w-full bg-gray-800 text-gray-200 text-xs rounded px-2.5 py-1.5
-                           border border-gray-700 outline-none focus:border-emerald-600
-                           cursor-pointer"
+                           border border-gray-700 outline-none focus:border-emerald-600 cursor-pointer"
               >
                 {LANGUAGES.map(l => (
                   <option key={l.value} value={l.value}>{l.label}</option>
                 ))}
               </select>
+            </div>
+
+            {/* Run button */}
+            <div className="px-4 pb-2 flex-shrink-0">
+              <button
+                onClick={handleRunCode}
+                disabled={runInProgress || isDisconnected}
+                className={`w-full text-sm rounded px-3 py-2 font-medium transition-colors
+                  ${runInProgress || isDisconnected
+                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                    : 'bg-green-900 hover:bg-green-800 text-green-100 cursor-pointer'
+                  }`}
+              >
+                {runInProgress ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-green-400 rounded-full animate-spin" />
+                    Running…
+                  </span>
+                ) : (
+                  <span className="flex items-center justify-center gap-2">
+                    {/* Play icon */}
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                    </svg>
+                    Run
+                  </span>
+                )}
+              </button>
             </div>
 
             {/* Request Review button */}
@@ -571,15 +758,16 @@ export default function App() {
 
           <DragHandle
             direction="vertical"
-            onMove={(x) => setLeftWidth(Math.max(160, Math.min(360, x)))}
+            onMove={(x) => setLeftWidth(Math.max(160, Math.min(400, x)))}
           />
         </>
       ) : (
         <CollapsedStrip side="left" label="Room" onOpen={() => setLeftOpen(true)} />
       )}
 
-      {/* ── Center column — editor + AI comments strip ── */}
+      {/* ── Center column: editor + output + comments ── */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+
         <main className="flex-1 overflow-hidden min-h-0">
           <Editor
             onLocalChange={onLocalChange}
@@ -589,13 +777,29 @@ export default function App() {
           />
         </main>
 
+        {/* Output panel — streams RUN_OUTPUT frames as they arrive from the
+            child process pipe over WebSocket (TCP application layer) */}
+        {outputOpen && (
+          <DragHandle
+            direction="horizontal"
+            onMove={(_, y) => setOutputHeight(Math.max(80, Math.min(450, window.innerHeight - y)))}
+          />
+        )}
+        <OutputPanel
+          lines={outputLines}
+          runInProgress={runInProgress}
+          open={outputOpen}
+          height={outputHeight}
+          onToggle={() => setOutputOpen(o => !o)}
+        />
+
+        {/* AI review comments panel */}
         {bottomOpen && (
           <DragHandle
             direction="horizontal"
             onMove={(_, y) => setBottomHeight(Math.max(80, Math.min(450, window.innerHeight - y)))}
           />
         )}
-
         <CommentsPanel
           comments={comments}
           reviewInProgress={reviewInProgress}
@@ -605,7 +809,7 @@ export default function App() {
         />
       </div>
 
-      {/* ── Right sidebar or collapsed strip ── */}
+      {/* ── Right sidebar ── */}
       {rightOpen ? (
         <>
           <DragHandle

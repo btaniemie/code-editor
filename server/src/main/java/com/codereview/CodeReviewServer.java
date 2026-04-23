@@ -21,49 +21,49 @@ import java.util.Collection;
  * WebSocket protocol via the HTTP Upgrade handshake; after that our onMessage
  * callback is called for every WebSocket frame received over that TCP stream.
  *
- * Application-layer protocol: every frame is a UTF-8 JSON object with a "type"
- * field acting as an opcode.  The router in onMessage reads that field and
- * dispatches to the appropriate handler method.
+ * Application-layer protocol: every text frame is a UTF-8 JSON object with a
+ * "type" field acting as an opcode.  The router in onMessage reads that field
+ * and dispatches to the appropriate handler method.
+ *
+ * Opcodes handled:
+ *   USER_JOIN, USER_LEAVE, EDIT, CURSOR, LANGUAGE_CHANGE,
+ *   REVIEW_REQUEST, CHAT, VOICE_STATUS,
+ *   FILE_CREATE, FILE_DELETE, FILE_RENAME, FILE_SWITCH,
+ *   RUN_REQUEST
+ *
+ * Opcodes broadcast by the server:
+ *   USER_JOIN, USER_LEAVE, SYNC, EDIT, CURSOR, LANGUAGE_CHANGE,
+ *   REVIEW_START, AI_COMMENT, REVIEW_DONE, AI_ERROR, CHAT, AI_CHAT,
+ *   VOICE_STATUS, VOICE_CHUNK (binary),
+ *   FILE_CREATE, FILE_DELETE, FILE_RENAME, FILE_SWITCH,
+ *   RUN_START, RUN_OUTPUT, RUN_DONE, RUN_ERROR, RUN_TIMEOUT
  */
 public class CodeReviewServer extends WebSocketServer {
 
-    private final RoomManager  roomManager = new RoomManager();
-    private final Gson         gson        = new Gson();
-    private final GeminiClient gemini;
+    private final RoomManager       roomManager       = new RoomManager();
+    private final Gson              gson              = new Gson();
+    private final GeminiClient      gemini;
+    private final ExecutionManager  executionManager  = new ExecutionManager();
 
     public CodeReviewServer(int port) {
-        // Bind to all interfaces (0.0.0.0) on the given port.
-        // org.java-websocket wraps java.net.ServerSocket under the hood.
         super(new InetSocketAddress(port));
         setReuseAddr(true);
 
-        // Read the Gemini API key from the environment.
-        // If missing, fall back to reading from a .env file in the working directory.
         String apiKey = System.getenv("GEMINI_API_KEY");
-        if (apiKey != null) apiKey = apiKey.trim(); // strip accidental whitespace/CRLF
-        if (apiKey == null || apiKey.isBlank()) {
-            apiKey = loadApiKeyFromDotEnv();
-        }
+        if (apiKey != null) apiKey = apiKey.trim();
+        if (apiKey == null || apiKey.isBlank()) apiKey = loadApiKeyFromDotEnv();
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("[Server] WARNING: GEMINI_API_KEY not set. Reviews will return AI_ERROR.");
             apiKey = "";
         } else {
             System.out.println("[Server] GEMINI_API_KEY loaded (length=" + apiKey.length()
-                + ", prefix=" + apiKey.substring(0, Math.min(6, apiKey.length())) + "...)");
+                    + ", prefix=" + apiKey.substring(0, Math.min(6, apiKey.length())) + "...)");
         }
         this.gemini = new GeminiClient(apiKey);
     }
 
-    // -------------------------------------------------------------------------
-    // WebSocketServer lifecycle callbacks
-    // -------------------------------------------------------------------------
+    // ── WebSocketServer lifecycle callbacks ───────────────────────────────────
 
-    /**
-     * Called once the TCP connection is established AND the WebSocket HTTP
-     * Upgrade handshake has completed successfully.  At this point we have a
-     * live bidirectional stream but the client hasn't told us who they are yet
-     * (USER_JOIN comes next).
-     */
     @Override
     public void onOpen(WebSocket conn, ClientHandshake handshake) {
         System.out.println("[onOpen]  New TCP connection from "
@@ -72,10 +72,8 @@ public class CodeReviewServer extends WebSocketServer {
     }
 
     /**
-     * Called when the TCP connection is closed — either because the client sent
-     * a WebSocket close frame or the socket was dropped (network error, browser
-     * tab closed, etc.).  We treat this the same as USER_LEAVE so the room
-     * stays consistent even if the client never sent an explicit leave message.
+     * Called when the TCP connection closes (client disconnect, browser tab
+     * closed, or network drop).  Treated identically to USER_LEAVE.
      */
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
@@ -86,9 +84,8 @@ public class CodeReviewServer extends WebSocketServer {
     }
 
     /**
-     * Called for every complete WebSocket text frame received over the TCP
-     * stream.  This is our application-layer message router: we parse the JSON,
-     * read the "type" opcode, and dispatch to the right handler.
+     * Application-layer message router.  Every complete WebSocket text frame
+     * arrives here; we parse the "type" opcode and dispatch accordingly.
      */
     @Override
     public void onMessage(WebSocket conn, String rawJson) {
@@ -109,26 +106,30 @@ public class CodeReviewServer extends WebSocketServer {
 
         String type = msg.get("type").getAsString();
 
-        // Message router — each case corresponds to one opcode in our
-        // application-layer protocol.
         switch (type) {
             case "USER_JOIN"      -> handleUserJoin(conn, msg);
             case "USER_LEAVE"     -> handleUserLeave(conn, msg);
             case "EDIT"           -> handleEdit(conn, msg);
             case "CURSOR"         -> handleCursor(conn, msg);
             case "REVIEW_REQUEST" -> handleReviewRequest(conn, msg);
-            case "CHAT"            -> handleChat(conn, msg);
-            case "LANGUAGE_CHANGE" -> handleLanguageChange(conn, msg);
-            case "VOICE_STATUS"    -> handleVoiceStatus(conn, msg);
-            default                -> System.out.println("[onMessage] Unknown message type: " + type);
+            case "CHAT"           -> handleChat(conn, msg);
+            case "LANGUAGE_CHANGE"-> handleLanguageChange(conn, msg);
+            case "VOICE_STATUS"   -> handleVoiceStatus(conn, msg);
+            // ── File tree opcodes ───────────────────────────────────────────
+            case "FILE_CREATE"    -> handleFileCreate(conn, msg);
+            case "FILE_DELETE"    -> handleFileDelete(conn, msg);
+            case "FILE_RENAME"    -> handleFileRename(conn, msg);
+            case "FILE_SWITCH"    -> handleFileSwitch(conn, msg);
+            // ── Code execution ──────────────────────────────────────────────
+            case "RUN_REQUEST"    -> handleRunRequest(conn, msg);
+            default               -> System.out.println("[onMessage] Unknown type: " + type);
         }
     }
 
     /**
-     * Called for every complete WebSocket binary frame received over the TCP stream.
-     * Used exclusively for VOICE_CHUNK: raw audio data captured by the client's
-     * MediaRecorder in ~100 ms slices.  We look up the sender's room by connection
-     * and relay the ByteBuffer to all other peers — no JSON parsing, minimal overhead.
+     * Binary frames carry raw audio (VOICE_CHUNK).  We relay the ByteBuffer
+     * to all other peers — no JSON parsing, minimal overhead.
+     * org.java-websocket sends this as a binary frame (opcode 0x2) over TCP.
      */
     @Override
     public void onMessage(WebSocket conn, ByteBuffer message) {
@@ -144,27 +145,26 @@ public class CodeReviewServer extends WebSocketServer {
     public void onError(WebSocket conn, Exception ex) {
         String addr = (conn != null) ? conn.getRemoteSocketAddress().toString() : "unknown";
         System.err.println("[onError] Socket error from " + addr + ": " + ex.getMessage());
-        // org.java-websocket will call onClose after this for fatal errors.
     }
 
     @Override
     public void onStart() {
-        System.out.println("[Server] CodeReview WebSocket server listening on port "
-                + getPort());
+        System.out.println("[Server] CodeReview WebSocket server listening on port " + getPort());
         System.out.println("[Server] Waiting for client connections...");
     }
 
-    // Message handlers
+    // ── Handler: USER_JOIN ────────────────────────────────────────────────────
 
     /**
-     * USER_JOIN  { "type": "USER_JOIN", "userId": "minh", "roomCode": "abc123" }
+     * USER_JOIN  { type, userId, roomCode }
      *
-     * 1. Validate required fields.
-     * 2. Register (conn, userId) in the room.
-     * 3. Broadcast USER_JOIN to everyone in the room (including the sender so
-     *    the client knows the join was accepted).
-     * 4. Send a full SYNC privately to the new connection.
-     * 5. Append a system chat notification and broadcast it to all members.
+     * 1. Register (conn, userId) in the room.
+     * 2. Broadcast USER_JOIN to all (so everyone updates their user list).
+     * 3. Unicast SYNC to the new connection with full room state.
+     * 4. Broadcast a system chat notification.
+     *
+     * The SYNC message now carries the full file tree (files map + activeFile)
+     * instead of a single document string.
      */
     private void handleUserJoin(WebSocket conn, JsonObject msg) {
         if (!msg.has("userId") || !msg.has("roomCode")) {
@@ -175,44 +175,38 @@ public class CodeReviewServer extends WebSocketServer {
         String userId   = msg.get("userId").getAsString().trim();
         String roomCode = msg.get("roomCode").getAsString().trim();
 
-        if (userId.isEmpty() || roomCode.isEmpty()) {
-            System.err.println("[handleUserJoin] Empty userId or roomCode.");
-            return;
-        }
+        if (userId.isEmpty() || roomCode.isEmpty()) return;
 
         Room room = roomManager.getOrCreateRoom(roomCode);
         room.addConnection(conn, userId);
 
-        // Build the broadcast payload — same shape as the incoming message so
-        // clients can use a single handler for join events.
         Collection<String> users = room.getUserIds();
 
-        JsonObject broadcast = new JsonObject();
-        broadcast.addProperty("type",     "USER_JOIN");
-        broadcast.addProperty("userId",   userId);
-        broadcast.addProperty("roomCode", roomCode);
-        broadcast.add("users", gson.toJsonTree(users));
-
-        String json = gson.toJson(broadcast);
-        room.broadcast(json);   // sends to every WebSocket TCP connection in the room
+        // Broadcast USER_JOIN so all clients refresh their user list.
+        JsonObject joinBcast = new JsonObject();
+        joinBcast.addProperty("type",     "USER_JOIN");
+        joinBcast.addProperty("userId",   userId);
+        joinBcast.addProperty("roomCode", roomCode);
+        joinBcast.add("users", gson.toJsonTree(users));
+        room.broadcast(gson.toJson(joinBcast));
 
         System.out.println("[handleUserJoin] '" + userId + "' joined room '" + roomCode
                 + "' — room now has " + users.size() + " user(s).");
 
-        // Send the current room state privately to just the new connection
-        // (unicast, not broadcast) so they start in sync with everyone else.
+        // Unicast SYNC to the new joiner so they start in sync with everyone.
+        // We send the full file tree (files + activeFile) instead of a single document.
         JsonObject sync = new JsonObject();
-        sync.addProperty("type",     "SYNC");
-        sync.addProperty("document", room.getDocument());
-        sync.addProperty("language", room.getLanguage());
+        sync.addProperty("type",       "SYNC");
+        sync.add("files",    gson.toJsonTree(room.getFiles()));     // full file tree
+        sync.addProperty("activeFile", room.getActiveFile());       // which file to open
+        sync.addProperty("language",   room.getLanguage());
         sync.add("users",    gson.toJsonTree(users));
         sync.add("cursors",  gson.toJsonTree(room.getCursors()));
         sync.add("comments", gson.toJsonTree(room.getComments()));
         sync.add("chat",     gson.toJsonTree(room.getChatHistory()));
-        conn.send(gson.toJson(sync));
+        conn.send(gson.toJson(sync));   // unicast — single TCP/WebSocket connection
 
-        // Broadcast a system chat notification so all users see who joined.
-        // We store it in history so late joiners see it too.
+        // System chat notification for the join event.
         String joinText = userId + " joined the room";
         room.addChatMessage("system", joinText, -1);
 
@@ -225,15 +219,16 @@ public class CodeReviewServer extends WebSocketServer {
         room.broadcast(gson.toJson(chatNotif));
     }
 
+    // ── Handler: EDIT ─────────────────────────────────────────────────────────
+
     /**
-     * EDIT  { "type": "EDIT", "userId": "minh", "content": "<full document text>" }
+     * EDIT  { type, userId, filePath, content }
      *
-     * 1. Update the authoritative document stored in the room (synchronized).
-     * 2. Broadcast to every client EXCEPT the sender — the sender already has
-     *    the change locally and does not need an echo.
+     * Updates the content of the specified file in the room's file tree, then
+     * broadcasts to all other clients (broadcastExcept avoids echoing to sender).
      *
-     * Using broadcastExcept here is the standard fanout pattern for shared editors:
-     * one writer, N-1 readers updated over their individual TCP connections.
+     * Networking pattern: one-writer, N-1 readers over separate TCP connections.
+     * The filePath field distinguishes which file in the tree is being edited.
      */
     private void handleEdit(WebSocket conn, JsonObject msg) {
         if (!msg.has("content") || !msg.has("userId")) {
@@ -247,59 +242,45 @@ public class CodeReviewServer extends WebSocketServer {
             return;
         }
 
-        String content = msg.get("content").getAsString();
-        String userId  = msg.get("userId").getAsString();
+        String content  = msg.get("content").getAsString();
+        String userId   = msg.get("userId").getAsString();
+        // filePath is required for the file tree; fall back to activeFile for
+        // compatibility with any legacy client that omits it.
+        String filePath = msg.has("filePath")
+                ? msg.get("filePath").getAsString()
+                : room.getActiveFile();
 
-        // Persist the new document state in the room (thread-safe via synchronized).
-        room.setDocument(content);
+        // Persist the new content for this specific file in the room's file tree.
+        room.setFile(filePath, content);
 
-        // Forward to all other clients in the room over their TCP connections.
+        // Forward to all other clients so they can update the same file in their tree.
         JsonObject fwd = new JsonObject();
-        fwd.addProperty("type",    "EDIT");
-        fwd.addProperty("userId",  userId);
-        fwd.addProperty("content", content);
+        fwd.addProperty("type",     "EDIT");
+        fwd.addProperty("userId",   userId);
+        fwd.addProperty("filePath", filePath);
+        fwd.addProperty("content",  content);
 
         room.broadcastExcept(conn, gson.toJson(fwd));
     }
 
-    /**
-     * USER_LEAVE  { "type": "USER_LEAVE", "userId": "minh" }
-     *
-     * Explicit leave message.  Delegates to handleDisconnect which also covers
-     * the implicit case (TCP drop, browser close).
-     */
+    // ── Handler: USER_LEAVE / disconnect ──────────────────────────────────────
+
     private void handleUserLeave(WebSocket conn, JsonObject msg) {
         handleDisconnect(conn);
     }
 
-    /**
-     * Common teardown path for both explicit USER_LEAVE and socket-level onClose.
-     *
-     * 1. Find which room this connection belongs to.
-     * 2. Remove the connection and retrieve the userId.
-     * 3. Append a system chat notification and broadcast it.
-     * 4. Broadcast USER_LEAVE to remaining users.
-     * 5. Clean up the room if it is now empty.
-     */
     private void handleDisconnect(WebSocket conn) {
         Room room = roomManager.getRoomForConnection(conn);
-        if (room == null) {
-            // Connection never completed USER_JOIN — nothing to clean up.
-            return;
-        }
+        if (room == null) return;
 
         String userId = room.removeConnection(conn);
-        if (userId == null) {
-            return;
-        }
+        if (userId == null) return;
 
         System.out.println("[handleDisconnect] '" + userId + "' left room '"
                 + room.getRoomCode() + "'.");
 
-        // Remove their cursor so it doesn't linger for other users.
         room.removeCursor(userId);
 
-        // Store and broadcast a system chat message for the leave event.
         String leaveText = userId + " left the room";
         room.addChatMessage("system", leaveText, -1);
 
@@ -311,50 +292,247 @@ public class CodeReviewServer extends WebSocketServer {
         chatNotif.add("replyTo", null);
         room.broadcast(gson.toJson(chatNotif));
 
-        // Notify remaining users that someone left.
         Collection<String> remaining = room.getUserIds();
 
         JsonObject leaveBroadcast = new JsonObject();
         leaveBroadcast.addProperty("type",   "USER_LEAVE");
         leaveBroadcast.addProperty("userId", userId);
         leaveBroadcast.add("users", gson.toJsonTree(remaining));
-
         room.broadcast(gson.toJson(leaveBroadcast));
 
-        // Remove the room from the registry if it is now empty.
         roomManager.removeRoomIfEmpty(room.getRoomCode());
     }
 
+    // ── Handler: FILE_CREATE ──────────────────────────────────────────────────
+
     /**
-     * REVIEW_REQUEST  { "type": "REVIEW_REQUEST", "userId": "minh", "language": "python" }
+     * FILE_CREATE  { type, userId, path, content? }
      *
-     * 1. Reject the request if a review is already in progress (atomic CAS via startReview()).
-     * 2. Optionally update the room's language from the request.
-     * 3. Clear previous comments and broadcast REVIEW_START to all clients.
-     * 4. Snapshot the current document and launch a background thread that:
-     *    a. Opens an outbound HTTPS connection to the Gemini API (secondary TCP stream).
-     *    b. Parses the JSON array response.
-     *    c. Stores each comment in room state and broadcasts AI_COMMENT to the room.
-     *    d. Broadcasts REVIEW_DONE (or AI_ERROR on failure).
-     *    e. Releases the review lock in a finally block.
+     * Adds a new file (or replaces an existing one) in the room's file tree,
+     * then broadcasts the event to all clients so every file tree UI updates.
      *
-     * The background thread is a daemon so it does not prevent JVM shutdown.
-     * It is named "review-<roomCode>" to make it visible in thread dumps.
+     * Networking: broadcast to ALL connections (including sender) so the sender's
+     * FILE_CREATE handler can auto-switch to the new file.
+     */
+    private void handleFileCreate(WebSocket conn, JsonObject msg) {
+        if (!msg.has("path")) {
+            System.err.println("[handleFileCreate] Missing path.");
+            return;
+        }
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String path    = msg.get("path").getAsString().trim();
+        String content = msg.has("content") ? msg.get("content").getAsString() : "";
+        String userId  = msg.has("userId")  ? msg.get("userId").getAsString()  : "unknown";
+
+        if (path.isEmpty()) return;
+
+        room.setFile(path, content);
+
+        System.out.println("[handleFileCreate] '" + userId + "' created file '"
+                + path + "' in room '" + room.getRoomCode() + "'.");
+
+        JsonObject bcast = new JsonObject();
+        bcast.addProperty("type",    "FILE_CREATE");
+        bcast.addProperty("userId",  userId);
+        bcast.addProperty("path",    path);
+        bcast.addProperty("content", content);
+        room.broadcast(gson.toJson(bcast));   // all clients, including sender
+    }
+
+    // ── Handler: FILE_DELETE ──────────────────────────────────────────────────
+
+    /**
+     * FILE_DELETE  { type, userId, path }
+     *
+     * Removes a file from the room's tree and broadcasts the deletion so all
+     * clients can remove it from their file trees and switch views if needed.
+     */
+    private void handleFileDelete(WebSocket conn, JsonObject msg) {
+        if (!msg.has("path")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String path   = msg.get("path").getAsString().trim();
+        String userId = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        room.deleteFile(path);
+
+        // If the deleted file was the active file, point activeFile to the
+        // first remaining file (or empty string if no files remain).
+        if (path.equals(room.getActiveFile())) {
+            String next = room.getFiles().keySet().stream().findFirst().orElse("");
+            room.setActiveFile(next);
+        }
+
+        System.out.println("[handleFileDelete] '" + userId + "' deleted file '"
+                + path + "' in room '" + room.getRoomCode() + "'.");
+
+        JsonObject bcast = new JsonObject();
+        bcast.addProperty("type",   "FILE_DELETE");
+        bcast.addProperty("userId", userId);
+        bcast.addProperty("path",   path);
+        room.broadcast(gson.toJson(bcast));
+    }
+
+    // ── Handler: FILE_RENAME ──────────────────────────────────────────────────
+
+    /**
+     * FILE_RENAME  { type, userId, oldPath, newPath }
+     *
+     * Renames a file in the room's tree (content is preserved) and broadcasts
+     * so all clients update their file tree and any open editor tabs.
+     */
+    private void handleFileRename(WebSocket conn, JsonObject msg) {
+        if (!msg.has("oldPath") || !msg.has("newPath")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String oldPath = msg.get("oldPath").getAsString().trim();
+        String newPath = msg.get("newPath").getAsString().trim();
+        String userId  = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        if (oldPath.isEmpty() || newPath.isEmpty() || oldPath.equals(newPath)) return;
+
+        room.renameFile(oldPath, newPath);
+
+        if (oldPath.equals(room.getActiveFile())) {
+            room.setActiveFile(newPath);
+        }
+
+        System.out.println("[handleFileRename] '" + userId + "' renamed '"
+                + oldPath + "' -> '" + newPath + "' in room '" + room.getRoomCode() + "'.");
+
+        JsonObject bcast = new JsonObject();
+        bcast.addProperty("type",    "FILE_RENAME");
+        bcast.addProperty("userId",  userId);
+        bcast.addProperty("oldPath", oldPath);
+        bcast.addProperty("newPath", newPath);
+        room.broadcast(gson.toJson(bcast));
+    }
+
+    // ── Handler: FILE_SWITCH ──────────────────────────────────────────────────
+
+    /**
+     * FILE_SWITCH  { type, userId, path }
+     *
+     * Updates the room's active file and broadcasts the switch to all OTHER
+     * clients so their editors follow along (standard collaborative navigation).
+     * The sender has already switched locally, so we use broadcastExcept.
+     */
+    private void handleFileSwitch(WebSocket conn, JsonObject msg) {
+        if (!msg.has("path")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String path   = msg.get("path").getAsString().trim();
+        String userId = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        room.setActiveFile(path);
+
+        System.out.println("[handleFileSwitch] '" + userId + "' switched to '"
+                + path + "' in room '" + room.getRoomCode() + "'.");
+
+        JsonObject bcast = new JsonObject();
+        bcast.addProperty("type",   "FILE_SWITCH");
+        bcast.addProperty("userId", userId);
+        bcast.addProperty("path",   path);
+        room.broadcastExcept(conn, gson.toJson(bcast));   // sender already switched
+    }
+
+    // ── Handler: RUN_REQUEST ──────────────────────────────────────────────────
+
+    /**
+     * RUN_REQUEST  { type, userId }
+     *
+     * 1. Acquire the execution lock (reject if already running).
+     * 2. Broadcast RUN_START so all clients show the "Running…" indicator.
+     * 3. Snapshot the current file tree and active file.
+     * 4. Hand off to ExecutionManager which runs on a background thread,
+     *    writing files to a temp dir and streaming output back as RUN_OUTPUT.
+     *
+     * Networking note: RUN_OUTPUT messages bridge two I/O streams:
+     *   (a) the child process stdout/stderr pipe  (OS process I/O)
+     *   (b) the room's WebSocket connections       (TCP application layer)
+     * Each line from the process is broadcast over all active TCP connections.
+     */
+    private void handleRunRequest(WebSocket conn, JsonObject msg) {
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String userId = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        if (!room.startExecution()) {
+            System.out.println("[handleRunRequest] Execution already in progress, ignoring request from '"
+                    + userId + "'.");
+            return;
+        }
+
+        System.out.println("[handleRunRequest] '" + userId + "' triggered run in room '"
+                + room.getRoomCode() + "' (language: " + room.getLanguage() + ").");
+
+        // Broadcast RUN_START so all clients enter running state.
+        JsonObject start = new JsonObject();
+        start.addProperty("type", "RUN_START");
+        room.broadcast(gson.toJson(start));
+
+        // Snapshot the file tree and active file now — edits that arrive
+        // while the process runs do not affect what gets executed.
+        executionManager.execute(
+                room.getFiles(),
+                room.getActiveFile(),
+                room.getLanguage(),
+                room
+        );
+    }
+
+    // ── Handler: CURSOR ──────────────────────────────────────────────────────
+
+    private void handleCursor(WebSocket conn, JsonObject msg) {
+        if (!msg.has("userId") || !msg.has("pos")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String userId = msg.get("userId").getAsString();
+        int    pos    = msg.get("pos").getAsInt();
+
+        room.setCursor(userId, pos);
+
+        JsonObject bcast = new JsonObject();
+        bcast.addProperty("type",   "CURSOR");
+        bcast.addProperty("userId", userId);
+        bcast.addProperty("pos",    pos);
+
+        room.broadcastExcept(conn, gson.toJson(bcast));
+    }
+
+    // ── Handler: REVIEW_REQUEST ───────────────────────────────────────────────
+
+    /**
+     * REVIEW_REQUEST  { type, userId, language? }
+     *
+     * Reviews the active file (room.getDocument() returns active file content).
+     * Runs the Gemini API call on a background thread that opens a secondary
+     * outbound HTTPS/TCP connection independent of the WebSocket server threads.
      */
     private void handleReviewRequest(WebSocket conn, JsonObject msg) {
         Room room = roomManager.getRoomForConnection(conn);
         if (room == null) return;
 
-        // Update language if the client included it
         if (msg.has("language") && !msg.get("language").getAsString().isBlank()) {
             room.setLanguage(msg.get("language").getAsString());
         }
 
         String userId = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
 
-        // Atomic guard — only one review at a time per room
         if (!room.startReview()) {
-            System.out.println("[handleReviewRequest] Review already in progress, ignoring request from '"
+            System.out.println("[handleReviewRequest] Review already in progress, ignoring '"
                     + userId + "'.");
             return;
         }
@@ -362,33 +540,22 @@ public class CodeReviewServer extends WebSocketServer {
         System.out.println("[handleReviewRequest] '" + userId + "' triggered review in room '"
                 + room.getRoomCode() + "' (language: " + room.getLanguage() + ").");
 
-        // Clear stale comments and tell every client a review is starting
         room.clearComments();
 
         JsonObject start = new JsonObject();
         start.addProperty("type", "REVIEW_START");
         room.broadcast(gson.toJson(start));
 
-        // Snapshot document state now — edits that arrive during the review
-        // do not affect what Gemini sees, keeping the comments consistent.
+        // Snapshot active file content — reviews the file the room is focused on.
         final String documentSnapshot = room.getDocument();
         final String language         = room.getLanguage();
 
-        // Launch the Gemini API call on a dedicated background thread.
-        // This secondary outbound TCP/HTTPS connection runs independently of
-        // the WebSocket server's connection-handling threads.
         Thread reviewThread = new Thread(() -> {
             try {
                 JsonArray comments = gemini.review(documentSnapshot, language);
                 System.out.println("[reviewThread] Gemini returned " + comments.size() + " comment(s).");
 
-                // If every client disconnected while Gemini was thinking, skip
-                // broadcasting — the room may already be removed from RoomManager.
-                if (room.isEmpty()) {
-                    System.out.println("[reviewThread] Room '" + room.getRoomCode()
-                            + "' is empty after review completed, skipping broadcast.");
-                    return;
-                }
+                if (room.isEmpty()) return;
 
                 for (int i = 0; i < comments.size(); i++) {
                     JsonObject c = comments.get(i).getAsJsonObject();
@@ -397,27 +564,18 @@ public class CodeReviewServer extends WebSocketServer {
                     String text     = c.has("text")     ? c.get("text").getAsString()     : "";
                     String severity = c.has("severity") ? c.get("severity").getAsString() : "info";
                     String category = c.has("category") ? c.get("category").getAsString() : "style";
-                    // fix is an optional nested object {startLine, endLine, text}
-                    // Gemini returns null or omits the field when no edit can be expressed.
+
                     Integer fixStartLine = null, fixEndLine = null;
                     String  fixText      = null;
                     if (c.has("fix") && !c.get("fix").isJsonNull() && c.get("fix").isJsonObject()) {
                         JsonObject fixObj = c.get("fix").getAsJsonObject();
-                        fixStartLine = fixObj.has("startLine") ? fixObj.get("startLine").getAsInt()    : null;
-                        fixEndLine   = fixObj.has("endLine")   ? fixObj.get("endLine").getAsInt()      : null;
-                        fixText      = fixObj.has("text")      ? fixObj.get("text").getAsString()      : null;
+                        fixStartLine = fixObj.has("startLine") ? fixObj.get("startLine").getAsInt() : null;
+                        fixEndLine   = fixObj.has("endLine")   ? fixObj.get("endLine").getAsInt()   : null;
+                        fixText      = fixObj.has("text")      ? fixObj.get("text").getAsString()   : null;
                     }
 
-                    System.out.println("[reviewThread] Comment line=" + line
-                            + " severity=" + severity
-                            + " fix=" + (fixText != null
-                                ? "lines " + fixStartLine + "-" + fixEndLine + " -> \"" + fixText + "\""
-                                : "null"));
-
-                    // Persist so late-joining users receive it in SYNC
                     room.addComment(line, text, severity, category, fixStartLine, fixEndLine, fixText);
 
-                    // Broadcast to every client in the room over their TCP connections
                     JsonObject aiComment = new JsonObject();
                     aiComment.addProperty("type",     "AI_COMMENT");
                     aiComment.addProperty("line",     line);
@@ -441,7 +599,6 @@ public class CodeReviewServer extends WebSocketServer {
             } catch (Exception e) {
                 System.err.println("[reviewThread] Gemini API error: " + e.getMessage());
 
-                // Give a human-readable message for the most common failure modes.
                 String errText;
                 if (e instanceof java.net.http.HttpTimeoutException) {
                     errText = "Review timed out after 30 s — please try again.";
@@ -457,8 +614,6 @@ public class CodeReviewServer extends WebSocketServer {
                 room.broadcast(gson.toJson(error));
 
             } finally {
-                // Always release the lock so future reviews can proceed,
-                // even if the room is now empty.
                 room.endReview();
             }
         });
@@ -468,47 +623,8 @@ public class CodeReviewServer extends WebSocketServer {
         reviewThread.start();
     }
 
-    /**
-     * CURSOR  { "type": "CURSOR", "userId": "minh", "pos": 7 }
-     *
-     * Stores the user's last known cursor position in the room so new joiners
-     * receive it in SYNC, then broadcasts to every other client so they can
-     * render the colored cursor widget at the correct position.
-     */
-    private void handleCursor(WebSocket conn, JsonObject msg) {
-        if (!msg.has("userId") || !msg.has("pos")) return;
+    // ── Handler: CHAT ─────────────────────────────────────────────────────────
 
-        Room room = roomManager.getRoomForConnection(conn);
-        if (room == null) return;
-
-        String userId = msg.get("userId").getAsString();
-        int    pos    = msg.get("pos").getAsInt();
-
-        room.setCursor(userId, pos);
-
-        JsonObject broadcast = new JsonObject();
-        broadcast.addProperty("type",   "CURSOR");
-        broadcast.addProperty("userId", userId);
-        broadcast.addProperty("pos",    pos);
-
-        room.broadcastExcept(conn, gson.toJson(broadcast));
-    }
-
-    /**
-     * CHAT  { "type": "CHAT", "userId": "minh", "text": "...", "replyTo": null }
-     *
-     * 1. Validate required fields.
-     * 2. Append the message to the room's persistent chat history so late
-     *    joiners receive it in SYNC.
-     * 3. Broadcast the CHAT message to every client in the room (including
-     *    the sender, so the sender sees their message in the shared history).
-     * 4. If the text contains "@ai" (case-insensitive), spawn a background
-     *    thread that calls Gemini with full room context and broadcasts the
-     *    response as an AI_CHAT message.
-     *
-     * Networking note: this is a simple store-and-forward pattern over the
-     * room's set of active TCP/WebSocket connections.
-     */
     private void handleChat(WebSocket conn, JsonObject msg) {
         if (!msg.has("userId") || !msg.has("text")) {
             System.err.println("[handleChat] Missing userId or text.");
@@ -528,14 +644,10 @@ public class CodeReviewServer extends WebSocketServer {
 
         if (text.isEmpty()) return;
 
-        // @ai/private — message and AI response are visible only to the sender.
-        // We do not persist to room history and do not broadcast to other clients.
         boolean isPrivate = text.toLowerCase().contains("@ai/private");
-
-        long timestamp = System.currentTimeMillis();
+        long    timestamp = System.currentTimeMillis();
 
         if (isPrivate) {
-            // Echo the message back only to the sender so it appears in their chat.
             JsonObject selfMsg = new JsonObject();
             selfMsg.addProperty("type",      "CHAT");
             selfMsg.addProperty("userId",    userId);
@@ -544,34 +656,19 @@ public class CodeReviewServer extends WebSocketServer {
             selfMsg.add("replyTo", null);
             selfMsg.addProperty("private",   true);
             conn.send(gson.toJson(selfMsg));
-
-            System.out.println("[handleChat] '" + userId + "' in room '" + room.getRoomCode()
-                    + "' (private @ai): " + text);
         } else {
-            // Persist to room history before broadcasting so that any concurrent
-            // SYNC (triggered by a join on another thread) sees this message too.
             room.addChatMessage(userId, text, replyTo);
 
-            // Build the outbound CHAT frame and broadcast to all TCP connections.
-            JsonObject broadcast = new JsonObject();
-            broadcast.addProperty("type",      "CHAT");
-            broadcast.addProperty("userId",    userId);
-            broadcast.addProperty("text",      text);
-            broadcast.addProperty("timestamp", timestamp);
-            if (replyTo >= 0) {
-                broadcast.addProperty("replyTo", replyTo);
-            } else {
-                broadcast.add("replyTo", null);
-            }
-            room.broadcast(gson.toJson(broadcast));
-
-            System.out.println("[handleChat] '" + userId + "' in room '" + room.getRoomCode()
-                    + "': " + text);
+            JsonObject bcast = new JsonObject();
+            bcast.addProperty("type",      "CHAT");
+            bcast.addProperty("userId",    userId);
+            bcast.addProperty("text",      text);
+            bcast.addProperty("timestamp", timestamp);
+            if (replyTo >= 0) bcast.addProperty("replyTo", replyTo);
+            else               bcast.add("replyTo", null);
+            room.broadcast(gson.toJson(bcast));
         }
 
-        // @ai trigger — if the message mentions @ai, ask Gemini for a response.
-        // We snapshot all room state now so edits during the API call don't
-        // affect the context the AI was given.
         if (text.toLowerCase().contains("@ai")) {
             final String              docSnapshot     = room.getDocument();
             final String              langSnapshot    = room.getLanguage();
@@ -581,13 +678,8 @@ public class CodeReviewServer extends WebSocketServer {
 
             Thread aiThread = new Thread(() -> {
                 try {
-                    System.out.println("[aiChatThread] @ai triggered by '" + userId
-                            + "' in room '" + room.getRoomCode() + "'"
-                            + (isPrivate ? " (private)" : "") + ".");
-
                     String aiResponse = gemini.chat(
-                        docSnapshot, langSnapshot, commentSnapshot, chatSnapshot, question
-                    );
+                            docSnapshot, langSnapshot, commentSnapshot, chatSnapshot, question);
 
                     JsonObject aiChat = new JsonObject();
                     aiChat.addProperty("type",      "AI_CHAT");
@@ -595,31 +687,20 @@ public class CodeReviewServer extends WebSocketServer {
                     aiChat.addProperty("timestamp", System.currentTimeMillis());
 
                     if (isPrivate) {
-                        // Send response only to the requesting connection; do not persist.
                         aiChat.addProperty("private", true);
                         if (conn.isOpen()) conn.send(gson.toJson(aiChat));
-                        System.out.println("[aiChatThread] Private AI response sent to '"
-                                + userId + "'.");
                     } else {
-                        // Persist the AI's reply so late joiners see it in SYNC.
                         room.addChatMessage("ai", aiResponse, -1);
-                        // Broadcast AI_CHAT to every client over their TCP connections.
                         room.broadcast(gson.toJson(aiChat));
-                        System.out.println("[aiChatThread] AI response sent to room '"
-                                + room.getRoomCode() + "'.");
                     }
 
                 } catch (Exception e) {
                     System.err.println("[aiChatThread] Gemini chat error: " + e.getMessage());
-
                     JsonObject error = new JsonObject();
                     error.addProperty("type", "AI_ERROR");
                     error.addProperty("text", "AI chat failed: " + e.getMessage());
-                    if (isPrivate) {
-                        if (conn.isOpen()) conn.send(gson.toJson(error));
-                    } else {
-                        room.broadcast(gson.toJson(error));
-                    }
+                    if (isPrivate) { if (conn.isOpen()) conn.send(gson.toJson(error)); }
+                    else           room.broadcast(gson.toJson(error));
                 }
             });
 
@@ -629,18 +710,47 @@ public class CodeReviewServer extends WebSocketServer {
         }
     }
 
-    /**
-     * LANGUAGE_CHANGE  { "type": "LANGUAGE_CHANGE", "userId": "minh", "language": "python" }
-     *
-     * Updates the room's stored language and broadcasts the change to every
-     * client so their CodeMirror syntax highlighting switches in real time.
-     * The language is also included in future SYNC messages so late joiners
-     * start with the correct highlighting.
-     */
-    /**
-     * Reads GEMINI_API_KEY from a .env file in the current working directory.
-     * Returns null if the file doesn't exist or the key isn't found.
-     */
+    // ── Handler: LANGUAGE_CHANGE ──────────────────────────────────────────────
+
+    private void handleLanguageChange(WebSocket conn, JsonObject msg) {
+        if (!msg.has("language")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        String language = msg.get("language").getAsString().trim();
+        String userId   = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
+
+        room.setLanguage(language);
+
+        JsonObject bcast = new JsonObject();
+        bcast.addProperty("type",     "LANGUAGE_CHANGE");
+        bcast.addProperty("userId",   userId);
+        bcast.addProperty("language", language);
+        room.broadcast(gson.toJson(bcast));
+
+        System.out.println("[handleLanguageChange] Room '" + room.getRoomCode()
+                + "' language -> '" + language + "' (set by '" + userId + "').");
+    }
+
+    // ── Handler: VOICE_STATUS ─────────────────────────────────────────────────
+
+    private void handleVoiceStatus(WebSocket conn, JsonObject msg) {
+        if (!msg.has("userId") || !msg.has("speaking")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        JsonObject bcast = new JsonObject();
+        bcast.addProperty("type",     "VOICE_STATUS");
+        bcast.addProperty("userId",   msg.get("userId").getAsString());
+        bcast.addProperty("speaking", msg.get("speaking").getAsBoolean());
+
+        room.broadcastExcept(conn, gson.toJson(bcast));
+    }
+
+    // ── .env loader ───────────────────────────────────────────────────────────
+
     private static String loadApiKeyFromDotEnv() {
         try {
             java.nio.file.Path envFile = Paths.get(".env");
@@ -659,50 +769,5 @@ public class CodeReviewServer extends WebSocketServer {
             System.err.println("[Server] Could not read .env file: " + e.getMessage());
         }
         return null;
-    }
-
-    /**
-     * VOICE_STATUS  { "type": "VOICE_STATUS", "userId": "minh", "speaking": true }
-     *
-     * Relayed to all other clients so they can render the "Speaking..." indicator.
-     * Ephemeral — not persisted to room state.
-     */
-    private void handleVoiceStatus(WebSocket conn, JsonObject msg) {
-        if (!msg.has("userId") || !msg.has("speaking")) return;
-
-        Room room = roomManager.getRoomForConnection(conn);
-        if (room == null) return;
-
-        JsonObject broadcast = new JsonObject();
-        broadcast.addProperty("type",     "VOICE_STATUS");
-        broadcast.addProperty("userId",   msg.get("userId").getAsString());
-        broadcast.addProperty("speaking", msg.get("speaking").getAsBoolean());
-
-        room.broadcastExcept(conn, gson.toJson(broadcast));
-
-        System.out.println("[handleVoiceStatus] '" + msg.get("userId").getAsString()
-                + "' speaking=" + msg.get("speaking").getAsBoolean()
-                + " in room '" + room.getRoomCode() + "'.");
-    }
-
-    private void handleLanguageChange(WebSocket conn, JsonObject msg) {
-        if (!msg.has("language")) return;
-
-        Room room = roomManager.getRoomForConnection(conn);
-        if (room == null) return;
-
-        String language = msg.get("language").getAsString().trim();
-        String userId   = msg.has("userId") ? msg.get("userId").getAsString() : "unknown";
-
-        room.setLanguage(language);
-
-        JsonObject broadcast = new JsonObject();
-        broadcast.addProperty("type",     "LANGUAGE_CHANGE");
-        broadcast.addProperty("userId",   userId);
-        broadcast.addProperty("language", language);
-        room.broadcast(gson.toJson(broadcast));
-
-        System.out.println("[handleLanguageChange] Room '" + room.getRoomCode()
-                + "' language -> '" + language + "' (set by '" + userId + "').");
     }
 }

@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -25,46 +26,93 @@ public class Room {
     private final String roomCode;
 
     // Maps each live WebSocket connection -> the userId that sent USER_JOIN on it.
-    // Using a plain HashMap protected by synchronized blocks so the locking is
-    // explicit and visible to the reader (important for the course context).
     private final Map<WebSocket, String> connections = new HashMap<>();
 
-    // Shared document content for this room.  Every EDIT message from any client
-    // updates this field (synchronized); every new joiner receives it in SYNC.
-    private String document = "";
+    // ── File tree ─────────────────────────────────────────────────────────────
+    // Maps file path (e.g. "src/Main.java") -> file content.
+    // LinkedHashMap preserves insertion order for deterministic SYNC payloads.
+    // Every EDIT message targets a specific path; every new joiner receives
+    // the full map in SYNC so they start in sync with the room.
+    private final Map<String, String> files = new LinkedHashMap<>();
 
-    // Last known cursor line for each userId.  Ephemeral — sent to new joiners
-    // in SYNC so they can see where everyone already is.
+    // The currently "active" (focused) file path.  Used as the review target
+    // and as the document new joiners' editors open on.
+    private String activeFile = "main.js";
+
+    // Last known cursor position for each userId (char offset in active file).
     private final Map<String, Integer> cursors = new HashMap<>();
 
-    // AI review comments accumulated for this room.  Persisted so a user who
-    // joins mid-session or after a review receives them in SYNC.
+    // AI review comments accumulated for this room.
     private final List<JsonObject> comments = new ArrayList<>();
 
-    // Chat message history for this room.  Every CHAT message is appended here
-    // so late joiners receive the full conversation in SYNC.
+    // Chat message history for this room.
     private final List<JsonObject> chatHistory = new ArrayList<>();
 
-    // Programming language for this room — used to build the Gemini prompt and
-    // to tell the client which CodeMirror language extension to activate.
+    // Programming language for this room.
     private String language = "javascript";
 
     // Prevents two clients from triggering simultaneous reviews.
-    // Volatile so the background review thread's write is immediately visible
-    // to the WebSocket handler threads without a full synchronized block.
     private volatile boolean reviewInProgress = false;
+
+    // Prevents concurrent code executions.
+    private volatile boolean executionInProgress = false;
 
     public Room(String roomCode) {
         this.roomCode = roomCode;
+        // Seed one default file so the room is never empty on first join.
+        files.put("main.js", "");
     }
 
+    // ── File tree ─────────────────────────────────────────────────────────────
+
+    /** Returns a snapshot of the full file tree (path -> content). */
+    public synchronized Map<String, String> getFiles() {
+        return new LinkedHashMap<>(files);
+    }
+
+    /** Returns the content of one file, or "" if the path does not exist. */
+    public synchronized String getFile(String path) {
+        return files.getOrDefault(path, "");
+    }
+
+    /** Creates or overwrites a file. */
+    public synchronized void setFile(String path, String content) {
+        files.put(path, content);
+    }
+
+    /** Removes a file. No-op if the path does not exist. */
+    public synchronized void deleteFile(String path) {
+        files.remove(path);
+    }
+
+    /**
+     * Renames (moves) a file.  Content is preserved; the old entry is removed.
+     * No-op if oldPath does not exist.
+     */
+    public synchronized void renameFile(String oldPath, String newPath) {
+        String content = files.remove(oldPath);
+        if (content != null) {
+            files.put(newPath, content);
+        }
+    }
+
+    public synchronized String getActiveFile() {
+        return activeFile;
+    }
+
+    public synchronized void setActiveFile(String path) {
+        this.activeFile = path;
+    }
+
+    /**
+     * Convenience: returns the content of the active file.
+     * Used by the AI review snapshot so it sees what the room is focused on.
+     */
     public synchronized String getDocument() {
-        return document;
+        return files.getOrDefault(activeFile, "");
     }
 
-    public synchronized void setDocument(String doc) {
-        this.document = doc;
-    }
+    // ── Cursors ───────────────────────────────────────────────────────────────
 
     public synchronized void setCursor(String userId, int line) {
         cursors.put(userId, line);
@@ -78,71 +126,38 @@ public class Room {
         cursors.remove(userId);
     }
 
-    public String getRoomCode() {
-        return roomCode;
-    }
+    // ── Connections ───────────────────────────────────────────────────────────
 
-    /**
-     * Register a new connection in this room.
-     */
+    public String getRoomCode() { return roomCode; }
+
     public synchronized void addConnection(WebSocket conn, String userId) {
         connections.put(conn, userId);
     }
 
-    /**
-     * Remove a connection (called on disconnect or explicit USER_LEAVE).
-     * Returns the userId that was on this connection, or null if unknown.
-     */
     public synchronized String removeConnection(WebSocket conn) {
         return connections.remove(conn);
     }
 
-    /**
-     * Returns true if no connections remain (room can be garbage-collected).
-     */
-    public synchronized boolean isEmpty() {
-        return connections.isEmpty();
-    }
+    public synchronized boolean isEmpty() { return connections.isEmpty(); }
 
-    /**
-     * Returns a snapshot of all userIds currently in the room.
-     */
     public synchronized Collection<String> getUserIds() {
         return Collections.unmodifiableCollection(connections.values());
     }
 
-    /**
-     * Returns true if the given connection is currently registered in this room.
-     */
     public synchronized boolean containsConnection(WebSocket conn) {
         return connections.containsKey(conn);
     }
 
-    // -------------------------------------------------------------------------
-    // Language
-    // -------------------------------------------------------------------------
+    // ── Language ──────────────────────────────────────────────────────────────
 
-    public synchronized String getLanguage() {
-        return language;
-    }
+    public synchronized String getLanguage() { return language; }
 
-    public synchronized void setLanguage(String language) {
-        this.language = language;
-    }
+    public synchronized void setLanguage(String language) { this.language = language; }
 
-    // -------------------------------------------------------------------------
-    // AI review comments
-    // -------------------------------------------------------------------------
+    // ── AI review comments ────────────────────────────────────────────────────
 
-    /**
-     * Appends one AI comment to the room's persistent comment list.
-     * Called from the background review thread after each Gemini response item.
-     *
-     * @param fix  the corrected single-line replacement suggested by the AI,
-     *             or null if the issue cannot be expressed as a one-line fix
-     */
     public synchronized void addComment(int line, String text, String severity, String category,
-                                         Integer fixStartLine, Integer fixEndLine, String fixText) {
+                                        Integer fixStartLine, Integer fixEndLine, String fixText) {
         JsonObject comment = new JsonObject();
         comment.addProperty("line",     line);
         comment.addProperty("text",     text);
@@ -158,113 +173,77 @@ public class Room {
         comments.add(comment);
     }
 
-    /**
-     * Returns a snapshot of all accumulated comments (safe to iterate outside lock).
-     */
-    public synchronized List<JsonObject> getComments() {
-        return new ArrayList<>(comments);
-    }
+    public synchronized List<JsonObject> getComments() { return new ArrayList<>(comments); }
 
-    /** Clears previous review results before starting a new review. */
-    public synchronized void clearComments() {
-        comments.clear();
-    }
+    public synchronized void clearComments() { comments.clear(); }
 
-    // -------------------------------------------------------------------------
-    // Chat history
-    // -------------------------------------------------------------------------
+    // ── Chat history ──────────────────────────────────────────────────────────
 
-    /**
-     * Appends one chat message to the room's persistent history.
-     * Called by handleChat before broadcasting so late joiners receive it in SYNC.
-     *
-     * @param userId    the sender's userId (or "system" for server notifications)
-     * @param text      the message body
-     * @param replyTo   index into chatHistory this message is replying to, or -1
-     */
     public synchronized void addChatMessage(String userId, String text, int replyTo) {
         JsonObject msg = new JsonObject();
         msg.addProperty("userId",    userId);
         msg.addProperty("text",      text);
         msg.addProperty("timestamp", System.currentTimeMillis());
-        if (replyTo >= 0) {
-            msg.addProperty("replyTo", replyTo);
-        } else {
-            msg.add("replyTo", null);
-        }
+        if (replyTo >= 0) msg.addProperty("replyTo", replyTo);
+        else              msg.add("replyTo", null);
         chatHistory.add(msg);
     }
 
-    /**
-     * Returns a snapshot of the full chat history (safe to iterate outside lock).
-     * Sent to new joiners in the SYNC message so they see prior conversation.
-     */
-    public synchronized List<JsonObject> getChatHistory() {
-        return new ArrayList<>(chatHistory);
-    }
+    public synchronized List<JsonObject> getChatHistory() { return new ArrayList<>(chatHistory); }
 
-    // -------------------------------------------------------------------------
-    // Review-in-progress guard
-    // -------------------------------------------------------------------------
+    // ── Review guard ──────────────────────────────────────────────────────────
 
-    /**
-     * Atomically transitions reviewInProgress false -> true.
-     * Returns true if the caller won the race and should proceed with the review;
-     * false if a review is already running and this request should be dropped.
-     */
+    /** Atomically acquires the review lock. Returns false if a review is already running. */
     public synchronized boolean startReview() {
         if (reviewInProgress) return false;
         reviewInProgress = true;
         return true;
     }
 
-    /** Called in the background thread's finally block to release the lock. */
-    public synchronized void endReview() {
-        reviewInProgress = false;
+    public synchronized void endReview() { reviewInProgress = false; }
+
+    // ── Execution guard ───────────────────────────────────────────────────────
+
+    /** Atomically acquires the execution lock. Returns false if already running. */
+    public synchronized boolean startExecution() {
+        if (executionInProgress) return false;
+        executionInProgress = true;
+        return true;
     }
 
-    // -------------------------------------------------------------------------
-    // Broadcast helpers
-    // -------------------------------------------------------------------------
+    public synchronized void endExecution() { executionInProgress = false; }
+
+    // ── Broadcast helpers ─────────────────────────────────────────────────────
 
     /**
      * Send a JSON message to every open connection in this room.
-     * Called "broadcast" to make the networking intent explicit.
+     * Each send() frames the payload as a WebSocket text frame (opcode 0x1) over TCP.
      */
     public synchronized void broadcast(String json) {
         for (WebSocket conn : connections.keySet()) {
-            if (conn.isOpen()) {
-                conn.send(json);   // frames the payload as a WebSocket text frame over TCP
-            }
+            if (conn.isOpen()) conn.send(json);
         }
     }
 
     /**
      * Same as broadcast but skips one connection — used to avoid echoing a
-     * message back to the sender.
+     * message back to the sender (standard fanout pattern: one writer, N-1 readers).
      */
     public synchronized void broadcastExcept(WebSocket except, String json) {
         for (Map.Entry<WebSocket, String> entry : connections.entrySet()) {
             WebSocket conn = entry.getKey();
-            if (conn != except && conn.isOpen()) {
-                conn.send(json);
-            }
+            if (conn != except && conn.isOpen()) conn.send(json);
         }
     }
 
     /**
-     * Broadcast a binary WebSocket frame (raw audio data) to every open
-     * connection in the room except the sender.
-     * org.java-websocket sends this as a binary frame (opcode 0x2) over TCP,
-     * as opposed to the text frames (opcode 0x1) used for JSON messages.
-     * The buffer is duplicated per recipient so each send gets independent
-     * position/limit state without re-allocating the underlying audio bytes.
+     * Broadcast a binary WebSocket frame (raw audio) to all peers except the sender.
+     * Binary frames use opcode 0x2 vs text frames (opcode 0x1).
+     * Buffer is duplicated per recipient so each send() gets independent position/limit.
      */
     public synchronized void broadcastBinaryExcept(WebSocket except, ByteBuffer data) {
         for (WebSocket conn : connections.keySet()) {
-            if (conn != except && conn.isOpen()) {
-                conn.send(data.duplicate());
-            }
+            if (conn != except && conn.isOpen()) conn.send(data.duplicate());
         }
     }
 }
