@@ -9,6 +9,7 @@ import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
 
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Collection;
@@ -118,8 +119,25 @@ public class CodeReviewServer extends WebSocketServer {
             case "REVIEW_REQUEST" -> handleReviewRequest(conn, msg);
             case "CHAT"            -> handleChat(conn, msg);
             case "LANGUAGE_CHANGE" -> handleLanguageChange(conn, msg);
+            case "VOICE_STATUS"    -> handleVoiceStatus(conn, msg);
             default                -> System.out.println("[onMessage] Unknown message type: " + type);
         }
+    }
+
+    /**
+     * Called for every complete WebSocket binary frame received over the TCP stream.
+     * Used exclusively for VOICE_CHUNK: raw audio data captured by the client's
+     * MediaRecorder in ~100 ms slices.  We look up the sender's room by connection
+     * and relay the ByteBuffer to all other peers — no JSON parsing, minimal overhead.
+     */
+    @Override
+    public void onMessage(WebSocket conn, ByteBuffer message) {
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) {
+            System.err.println("[onMessage/binary] Binary frame from unregistered connection — ignoring.");
+            return;
+        }
+        room.broadcastBinaryExcept(conn, message);
     }
 
     @Override
@@ -641,6 +659,30 @@ public class CodeReviewServer extends WebSocketServer {
             System.err.println("[Server] Could not read .env file: " + e.getMessage());
         }
         return null;
+    }
+
+    /**
+     * VOICE_STATUS  { "type": "VOICE_STATUS", "userId": "minh", "speaking": true }
+     *
+     * Relayed to all other clients so they can render the "Speaking..." indicator.
+     * Ephemeral — not persisted to room state.
+     */
+    private void handleVoiceStatus(WebSocket conn, JsonObject msg) {
+        if (!msg.has("userId") || !msg.has("speaking")) return;
+
+        Room room = roomManager.getRoomForConnection(conn);
+        if (room == null) return;
+
+        JsonObject broadcast = new JsonObject();
+        broadcast.addProperty("type",     "VOICE_STATUS");
+        broadcast.addProperty("userId",   msg.get("userId").getAsString());
+        broadcast.addProperty("speaking", msg.get("speaking").getAsBoolean());
+
+        room.broadcastExcept(conn, gson.toJson(broadcast));
+
+        System.out.println("[handleVoiceStatus] '" + msg.get("userId").getAsString()
+                + "' speaking=" + msg.get("speaking").getAsBoolean()
+                + " in room '" + room.getRoomCode() + "'.");
     }
 
     private void handleLanguageChange(WebSocket conn, JsonObject msg) {

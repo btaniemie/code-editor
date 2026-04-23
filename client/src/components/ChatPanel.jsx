@@ -25,9 +25,14 @@ function colorForUser(userId) {
  *   currentUserId — used to style the sender's own messages differently
  *   onSendChat    — called with (text) when the user submits a message
  */
+// Web Speech API — available in Chrome/Edge, undefined in Firefox/Safari
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+
 export default function ChatPanel({ chat, currentUserId, onSendChat, width, onClose }) {
-  const [input, setInput] = useState('')
-  const bottomRef         = useRef(null)
+  const [input,       setInput]       = useState('')
+  const [isListening, setIsListening] = useState(false)
+  const bottomRef                     = useRef(null)
+  const recognitionRef                = useRef(null)
 
   // True while the last non-system message contains @ai/@ai/private and no AI reply has followed it yet
   const lastNonSystem   = [...chat].reverse().find(m => m.userId !== 'system')
@@ -52,6 +57,34 @@ export default function ChatPanel({ chat, currentUserId, onSendChat, width, onCl
       e.preventDefault()
       handleSend()
     }
+  }
+
+  const toggleListening = () => {
+    if (!SpeechRecognition) return
+
+    if (isListening) {
+      recognitionRef.current?.stop()
+      return
+    }
+
+    const recognition = new SpeechRecognition()
+    recognition.continuous      = false  // stop after first pause
+    recognition.interimResults  = true   // stream partial results into the input
+    recognition.lang            = 'en-US'
+    recognitionRef.current      = recognition
+
+    recognition.onresult = (e) => {
+      // Concatenate all result segments; interim ones are still in-flight
+      let transcript = ''
+      for (const result of e.results) transcript += result[0].transcript
+      setInput(transcript)
+    }
+
+    recognition.onend  = () => setIsListening(false)
+    recognition.onerror = () => setIsListening(false)
+
+    recognition.start()
+    setIsListening(true)
   }
 
   return (
@@ -180,6 +213,24 @@ export default function ChatPanel({ chat, currentUserId, onSendChat, width, onCl
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
         />
+
+        {/* Speech-to-text button — hidden when Web Speech API is unavailable */}
+        {SpeechRecognition && (
+          <button
+            onClick={toggleListening}
+            title={isListening ? 'Stop dictation' : 'Dictate message'}
+            className={`flex-shrink-0 rounded px-2 py-1.5 transition-colors
+              ${isListening
+                ? 'bg-red-700 text-white ring-1 ring-red-400'
+                : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              }`}
+          >
+            <svg className={`w-3.5 h-3.5 ${isListening ? 'animate-pulse' : ''}`} viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 1a4 4 0 0 1 4 4v7a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 18.93V22h2v-2.07A8.001 8.001 0 0 0 20 12h-2a6 6 0 0 1-12 0H4a8.001 8.001 0 0 0 7 7.93z"/>
+            </svg>
+          </button>
+        )}
+
         <button
           onClick={handleSend}
           disabled={!input.trim()}

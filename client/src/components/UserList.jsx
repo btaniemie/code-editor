@@ -14,7 +14,7 @@ function colorForUser(userId) {
   return COLORS[Math.abs(hash) % COLORS.length]
 }
 
-export default function UserList({ users, currentUserId }) {
+export default function UserList({ users, currentUserId, speakingUsers = {} }) {
   return (
     <div className="flex-1 overflow-y-auto px-4 py-3">
       <p className="text-xs text-gray-400 uppercase tracking-widest mb-3">
@@ -22,20 +22,33 @@ export default function UserList({ users, currentUserId }) {
       </p>
 
       <ul className="space-y-2">
-        {users.map(userId => (
-          <li key={userId} className="flex items-center gap-2">
-            {/* Colored avatar dot */}
-            <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: colorForUser(userId) }} />
+        {users.map(userId => {
+          const isTalking = speakingUsers[userId]
+          return (
+            <li key={userId} className="flex items-center gap-2">
+              {/* Colored avatar dot — pulses red when the user is speaking */}
+              <span
+                className={`w-2 h-2 rounded-full flex-shrink-0 transition-colors ${isTalking ? 'bg-red-500 animate-pulse' : ''}`}
+                style={isTalking ? {} : { background: colorForUser(userId) }}
+              />
 
-            {/* Username */}
-            <span className={`text-sm truncate ${userId === currentUserId ? 'text-white font-medium' : 'text-gray-300'}`}>
-              {userId}
-              {userId === currentUserId && (
-                <span className="ml-1 text-xs text-gray-500">(you)</span>
+              {/* Username */}
+              <span className={`text-sm truncate ${userId === currentUserId ? 'text-white font-medium' : 'text-gray-300'}`}>
+                {userId}
+                {userId === currentUserId && (
+                  <span className="ml-1 text-xs text-gray-500">(you)</span>
+                )}
+              </span>
+
+              {/* Speaking badge */}
+              {isTalking && (
+                <span className="ml-auto text-[10px] text-red-400 font-medium flex-shrink-0">
+                  speaking
+                </span>
               )}
-            </span>
-          </li>
-        ))}
+            </li>
+          )
+        })}
       </ul>
     </div>
   )

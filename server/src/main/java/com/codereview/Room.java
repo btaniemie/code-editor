@@ -3,6 +3,7 @@ package com.codereview;
 import com.google.gson.JsonObject;
 import org.java_websocket.WebSocket;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -247,6 +248,22 @@ public class Room {
             WebSocket conn = entry.getKey();
             if (conn != except && conn.isOpen()) {
                 conn.send(json);
+            }
+        }
+    }
+
+    /**
+     * Broadcast a binary WebSocket frame (raw audio data) to every open
+     * connection in the room except the sender.
+     * org.java-websocket sends this as a binary frame (opcode 0x2) over TCP,
+     * as opposed to the text frames (opcode 0x1) used for JSON messages.
+     * The buffer is duplicated per recipient so each send gets independent
+     * position/limit state without re-allocating the underlying audio bytes.
+     */
+    public synchronized void broadcastBinaryExcept(WebSocket except, ByteBuffer data) {
+        for (WebSocket conn : connections.keySet()) {
+            if (conn != except && conn.isOpen()) {
+                conn.send(data.duplicate());
             }
         }
     }
