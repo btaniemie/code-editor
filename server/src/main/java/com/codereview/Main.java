@@ -13,7 +13,14 @@ public class Main {
 
     public static void main(String[] args) throws InterruptedException {
         int port = DEFAULT_PORT;
-        if (args.length > 0) {
+        String portEnv = System.getenv("PORT");
+        if (portEnv != null && !portEnv.isBlank()) {
+            try {
+                port = Integer.parseInt(portEnv.trim());
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid PORT env var '" + portEnv + "', using default " + DEFAULT_PORT);
+            }
+        } else if (args.length > 0) {
             try {
                 port = Integer.parseInt(args[0]);
             } catch (NumberFormatException e) {
