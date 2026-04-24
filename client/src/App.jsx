@@ -8,7 +8,7 @@ import FileTree      from './components/FileTree'
 import OutputPanel   from './components/OutputPanel'
 import { useVoiceChat } from './hooks/useVoiceChat'
 
-const SERVER_URL = 'ws://localhost:8080'
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'ws://localhost:8080'
 
 const LANGUAGES = [
   { value: 'javascript', label: 'JavaScript' },
