@@ -2,6 +2,9 @@
 
 A real-time collaborative code editor. Multiple users share a live browser-based workspace with a multi-file project tree, live cursors, AI-generated inline code review, a room chat with an AI assistant, live voice chat, and an integrated code runner that streams output back over WebSocket.
 
+## Demo
+https://youtu.be/ALvd31L9hq8
+
 ## Prerequisites
 
 - Java 17+
