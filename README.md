@@ -166,7 +166,3 @@ All client-server communication uses a custom application-layer protocol over We
 | Frame | Direction | Description |
 |---|---|---|
 | `VOICE_CHUNK` | both | Raw audio data prefixed with a 1-byte header encoding the sender's userId length, followed by the userId bytes, followed by the MediaRecorder audio payload. The server relays it to all other connections in the room without parsing. |
-
----
-
-This is a final project created for COMP 352: Computer Networks.
