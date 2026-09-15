@@ -29,7 +29,7 @@ import java.util.Collection;
  *   USER_JOIN, USER_LEAVE, EDIT, CURSOR, LANGUAGE_CHANGE,
  *   REVIEW_REQUEST, CHAT, VOICE_STATUS,
  *   FILE_CREATE, FILE_DELETE, FILE_RENAME, FILE_SWITCH,
- *   RUN_REQUEST
+ *   RUN_REQUEST, PING
  *
  * Opcodes broadcast by the server:
  *   USER_JOIN, USER_LEAVE, SYNC, EDIT, CURSOR, LANGUAGE_CHANGE,
@@ -56,8 +56,7 @@ public class CodeReviewServer extends WebSocketServer {
             System.err.println("[Server] WARNING: GEMINI_API_KEY not set. Reviews will return AI_ERROR.");
             apiKey = "";
         } else {
-            System.out.println("[Server] GEMINI_API_KEY loaded (length=" + apiKey.length()
-                    + ", prefix=" + apiKey.substring(0, Math.min(6, apiKey.length())) + "...)");
+            System.out.println("[Server] GEMINI_API_KEY loaded.");
         }
         this.gemini = new GeminiClient(apiKey);
     }
@@ -122,8 +121,18 @@ public class CodeReviewServer extends WebSocketServer {
             case "FILE_SWITCH"    -> handleFileSwitch(conn, msg);
             // ── Code execution ──────────────────────────────────────────────
             case "RUN_REQUEST"    -> handleRunRequest(conn, msg);
+            // Does not require room membership, so deployment monitors can
+            // use the same lightweight heartbeat as browser clients.
+            case "PING"           -> handlePing(conn);
             default               -> System.out.println("[onMessage] Unknown type: " + type);
         }
+    }
+
+    private void handlePing(WebSocket conn) {
+        JsonObject pong = new JsonObject();
+        pong.addProperty("type", "PONG");
+        pong.addProperty("timestamp", System.currentTimeMillis());
+        conn.send(gson.toJson(pong));
     }
 
     /**

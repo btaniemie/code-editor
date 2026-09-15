@@ -37,7 +37,7 @@ java -jar target/codereview-server.jar
 
 Expected output:
 ```
-[Server] GEMINI_API_KEY loaded (length=39, prefix=AIzaSy...)
+[Server] GEMINI_API_KEY loaded.
 [Main] Server started. Press Ctrl+C to stop.
 [Server] CodeReview WebSocket server listening on port 8080
 [Server] Waiting for client connections...
@@ -56,6 +56,38 @@ npm run dev
 ```
 
 The client runs at `http://localhost:5173`.
+
+## Deploying on Render
+
+The repository includes a `render.yaml` Blueprint for the WebSocket backend.
+
+1. In Render, create a new Blueprint and select this repository.
+2. Use the repository-root `render.yaml` when prompted.
+3. Enter `GEMINI_API_KEY` when Render requests the unsynced secret value.
+4. After the deploy succeeds, copy the backend URL and replace `https://` with
+   `wss://` (for example, `wss://codelab-server.onrender.com`).
+5. Set that value as `VITE_SERVER_URL` in the frontend hosting provider and
+   rebuild the frontend.
+
+The browser sends a lightweight `PING` every ten minutes while a room is open,
+and the server replies with `PONG`. This keeps active WebSocket sessions from
+being treated as idle and also detects stale connections at the protocol level.
+
+To keep a free Render instance warm even when no browser is connected, add the
+repository variable `RENDER_WEBSOCKET_URL` under **Settings → Secrets and
+variables → Actions → Variables**. Use the `wss://` backend URL. The
+`Keep Render backend warm` workflow then checks the socket every ten minutes.
+The scheduled workflow is skipped until this variable exists.
+
+Free instances can still restart, and all rooms are held in memory, so room
+state is not preserved across a restart or deployment.
+
+> **Security:** The runner starts submitted programs inside the backend
+> container. The server removes its environment variables from child processes,
+> rejects paths outside the temporary workspace, and enforces a timeout, but
+> this is not a hardened multi-tenant sandbox. Keep the deployment private or
+> add authentication and a dedicated execution sandbox before accepting code
+> from untrusted users.
 
 ## Using the App
 
@@ -157,6 +189,8 @@ All client-server communication uses a custom application-layer protocol over We
 | `RUN_DONE` | server → clients | Process exited; hides spinner |
 | `RUN_ERROR` | server → clients | Execution setup failed (e.g. no active file, unsupported language) |
 | `RUN_TIMEOUT` | server → clients | Process was killed after the 10-second hard timeout |
+| `PING` | client → server | Lightweight heartbeat sent by browsers and deployment monitors |
+| `PONG` | server → client | Acknowledges a heartbeat and includes a server timestamp |
 
 ### Binary frames
 
