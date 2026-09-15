@@ -9,6 +9,7 @@ import OutputPanel   from './components/OutputPanel'
 import { useVoiceChat } from './hooks/useVoiceChat'
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'ws://localhost:8080'
+const HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000
 
 const LANGUAGES = [
   { value: 'javascript', label: 'JavaScript' },
@@ -175,10 +176,16 @@ export default function App() {
 
   const connectWS = useCallback((userId, roomCode) => {
     const ws = new WebSocket(SERVER_URL)
+    let heartbeatTimer = null
     wsRef.current = ws
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'USER_JOIN', userId, roomCode }))
+      heartbeatTimer = window.setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'PING' }))
+        }
+      }, HEARTBEAT_INTERVAL_MS)
       setStatus('Connected')
     }
     ws.onmessage = (event) => {
@@ -188,8 +195,13 @@ export default function App() {
       }
       handleMessage(JSON.parse(event.data), userId, roomCode)
     }
-    ws.onclose = () => setStatus('Disconnected')
-    ws.onerror = () => setStatus('Connection error')
+    ws.onclose = () => {
+      if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer)
+      if (wsRef.current === ws) setStatus('Disconnected')
+    }
+    ws.onerror = () => {
+      if (wsRef.current === ws) setStatus('Connection error')
+    }
   }, []) // stable — all updates go through refs
 
   const handleJoin = useCallback((userId, roomCode) => {
@@ -224,6 +236,10 @@ export default function App() {
 
   function handleMessage(msg, userId, roomCode) {
     switch (msg.type) {
+
+      case 'PONG':
+        // Response to the keepalive; no UI update is needed.
+        break
 
       case 'USER_JOIN':
         setUsers(msg.users)

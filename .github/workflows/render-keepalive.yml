@@ -1,0 +1,55 @@
+name: Keep Render backend warm
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    if: ${{ vars.RENDER_WEBSOCKET_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Open the WebSocket and request a pong
+        uses: actions/github-script@v8
+        env:
+          RENDER_WEBSOCKET_URL: ${{ vars.RENDER_WEBSOCKET_URL }}
+        with:
+          script: |
+            const url = process.env.RENDER_WEBSOCKET_URL;
+            if (!url.startsWith('wss://')) {
+              core.setFailed('RENDER_WEBSOCKET_URL must start with wss://');
+              return;
+            }
+
+            await new Promise((resolve, reject) => {
+              const socket = new WebSocket(url);
+              const timeout = setTimeout(() => {
+                socket.close();
+                reject(new Error('Timed out waiting for the Render WebSocket'));
+              }, 90000);
+
+              socket.addEventListener('open', () => {
+                socket.send(JSON.stringify({ type: 'PING' }));
+              });
+
+              socket.addEventListener('message', (event) => {
+                try {
+                  const message = JSON.parse(String(event.data));
+                  if (message.type !== 'PONG') return;
+                  clearTimeout(timeout);
+                  socket.close();
+                  resolve();
+                } catch (error) {
+                  clearTimeout(timeout);
+                  socket.close();
+                  reject(error);
+                }
+              });
+
+              socket.addEventListener('error', () => {
+                clearTimeout(timeout);
+                reject(new Error('Unable to connect to the Render WebSocket'));
+              });
+            });

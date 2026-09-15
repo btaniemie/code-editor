@@ -48,9 +48,13 @@ public class ExecutionManager {
                 // Files.createTempDirectory creates a unique dir under the OS
                 // temp path (e.g. /tmp/codelab-run-12345678).
                 tempDir = Files.createTempDirectory("codelab-run-");
+                Path executionRoot = tempDir.toAbsolutePath().normalize();
 
                 for (Map.Entry<String, String> entry : files.entrySet()) {
-                    Path dest = tempDir.resolve(entry.getKey());
+                    Path dest = executionRoot.resolve(entry.getKey()).normalize();
+                    if (dest.equals(executionRoot) || !dest.startsWith(executionRoot)) {
+                        throw new IOException("Invalid file path: " + entry.getKey());
+                    }
                     // createDirectories is a no-op if the path already exists,
                     // so nested paths like "src/Main.java" work safely.
                     Files.createDirectories(dest.getParent());
@@ -82,7 +86,15 @@ public class ExecutionManager {
                     return;
                 }
 
-                List<String> runCmd = buildRunCommand(language, activeFile);
+                Path entryPoint = executionRoot.resolve(activeFile).normalize();
+                if (!entryPoint.startsWith(executionRoot) || !Files.isRegularFile(entryPoint)) {
+                    broadcast(room, runError("The active file is not a valid project file."));
+                    broadcast(room, runDone());
+                    return;
+                }
+
+                String safeActiveFile = executionRoot.relativize(entryPoint).toString();
+                List<String> runCmd = buildRunCommand(language, safeActiveFile);
                 if (runCmd == null) {
                     broadcast(room, runError("Unsupported language: " + language));
                     broadcast(room, runDone());
@@ -133,6 +145,11 @@ public class ExecutionManager {
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.directory(workDir.toFile());
+        // Submitted programs do not need the server's API credentials.
+        String path = pb.environment().get("PATH");
+        pb.environment().clear();
+        if (path != null) pb.environment().put("PATH", path);
+        pb.environment().put("LANG", "C.UTF-8");
         // Merge stderr into stdout — one unified stream, same as a terminal.
         pb.redirectErrorStream(true);
 
@@ -157,6 +174,7 @@ public class ExecutionManager {
         // Wait for the process to finish, or kill it after the timeout.
         boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
         if (!finished) {
+            process.descendants().forEach(ProcessHandle::destroyForcibly);
             process.destroyForcibly();
             reader.interrupt();
             broadcast(room, runTimeout());
