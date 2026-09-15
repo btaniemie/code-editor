@@ -73,11 +73,17 @@ The browser sends a lightweight `PING` every ten minutes while a room is open,
 and the server replies with `PONG`. This keeps active WebSocket sessions from
 being treated as idle and also detects stale connections at the protocol level.
 
-To keep a free Render instance warm even when no browser is connected, add the
-repository variable `RENDER_WEBSOCKET_URL` under **Settings → Secrets and
-variables → Actions → Variables**. Use the `wss://` backend URL. The
-`Keep Render backend warm` workflow then checks the socket every ten minutes.
-The scheduled workflow is skipped until this variable exists.
+The deployed container also exposes `GET /health`, which returns a lightweight
+JSON response without opening a WebSocket. To keep a free instance warm, point
+an external scheduler such as cron-job.org at
+`https://<your-render-service>.onrender.com/health` every ten minutes. The
+scheduler must run outside this Render service so it can wake the instance.
+
+The repository also contains a GitHub Actions WebSocket heartbeat. To enable it
+as a fallback, add the repository variable `RENDER_WEBSOCKET_URL` under
+**Settings → Secrets and variables → Actions → Variables** and use the `wss://`
+backend URL. GitHub's scheduled workflow delivery is best-effort, so use the
+external `/health` scheduler as the primary keepalive.
 
 Free instances can still restart, and all rooms are held in memory, so room
 state is not preserved across a restart or deployment.
